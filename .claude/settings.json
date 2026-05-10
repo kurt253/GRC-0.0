@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import openpyxl; print\\('openpyxl OK'\\)\")",
+      "Bash(python build_grc.py)",
+      "Bash(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\data\\\\repositories\")",
+      "Bash(Out-Null)",
+      "Bash(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\data\\\\template\")",
+      "Bash(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\scripts\")",
+      "Bash(Write-Output \"OK\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\data\\\\repositories\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\data\\\\template\")",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\scripts\")",
+      "Bash(python scripts/build_grc.py)"
+    ]
+  }
+}

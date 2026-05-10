@@ -9,8 +9,9 @@ Output: ../data/template/GRC_Tool.xlsm
 import datetime
 import io
 import os
+import re
 from pathlib import Path
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, Protection
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -20,6 +21,9 @@ from openpyxl.workbook.defined_name import DefinedName
 # ── Paden & metadata ──────────────────────────────────────────────────────────
 OUT      = Path(__file__).parent.parent / "data" / "template" / "GRC_Tool.xlsm"
 OUT_XLSX = OUT.with_suffix(".xlsx")   # tussenstap voor win32com
+CYFUN_SRC   = Path(__file__).parent.parent / "data" / "repositories" / "CyFun2025_Self-Assessment_tool_ESSENTIAL_v3.1.xlsx"
+MAPPING_SRC = Path(__file__).parent.parent / "data" / "repositories" / "Mapping_CyFun2023-CyFun2025_v2026-02-25.xlsx"
+CYFUN23_SRC = Path(__file__).parent.parent / "data" / "repositories" / "CyFun Self-Assessment tool V2025-08-04.xlsx"
 USERNAME = os.environ.get("USERNAME", os.environ.get("USER", "Onbekend"))
 NOW_STR  = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -2102,6 +2106,332 @@ cur_ref = ref_dim_table(ws_ref, cur_ref, "ref_section_avail", "ref_avail_subtitl
 cur_ref = ref_dim_table(ws_ref, cur_ref, "ref_section_conf",  "ref_conf_subtitle",
                          ["ref_conf_1","ref_conf_2","ref_conf_3","ref_conf_4","ref_conf_5"])
 
+
+# ── CyFun Controls sheet ─────────────────────────────────────────────────────
+# Kolomindeling:  A–F = 2025 data  |  G = Versie  |  H–M = 2023 data
+COL_25_START = 1   # A
+COL_VERSIE   = 7   # G
+COL_23_START = 8   # H
+
+def _norm_id(s):
+    """Lowercase + trailing -N → .N  (bv. 'ID.AM-03-3' → 'id.am-03.3')."""
+    return re.sub(r'-(\d+)$', r'.\1', str(s).strip().lower())
+
+def _load_all_mappings():
+    """
+    Doorloop de 3 sheets van het mapping-workbook.
+    Geeft terug:
+      both_map  : {norm_2025_id → "2023_id"}
+      only25    : {norm 2025-only IDs}
+      only23    : lijst van {id, ctrl_linked, key_meas} — 2023-only controls
+    BASIC-sheet heeft geen DELETED/NEW-kolommen; IMPORTANT/ESSENTIAL wel.
+    """
+    both_map, only25, only23 = {}, set(), []
+    if not MAPPING_SRC.exists():
+        return both_map, only25, only23
+
+    wb = load_workbook(str(MAPPING_SRC), read_only=True, data_only=True)
+
+    for sheet in ["CyFun 2023>25 BASIC", "CyFun 2023>25 IMPORTANT", "CyFun 2023>25 ESSENTIAL"]:
+        ws = wb[sheet]
+        is_basic = sheet.endswith("BASIC")
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if is_basic:
+                # BASIC: [2023_ID, req23, km23, score, 2025_ID, req25, km25, score]
+                id23, km23  = row[0], row[2]
+                id25        = row[4]
+                deleted     = False
+                new_flag    = False
+            else:
+                # IMPORTANT/ESSENTIAL: [2023_ID, req23, km23, DELETED, score, 2025_ID, req25, km25, NEW, score]
+                id23, km23  = row[0], row[2]
+                deleted     = row[3] == "DELETED"
+                id25        = row[5]
+                new_flag    = row[8] == "New"
+
+            # Lege rijen overslaan
+            if id23 is None and id25 is None:
+                continue
+
+            km23_s = str(km23).strip() if km23 else ""
+
+            if deleted:
+                only23.append({
+                    "id":          str(id23).strip(),
+                    "ctrl_linked": km23_s if "Control" in km23_s else "",
+                    "key_meas":    "Key Measure" if "Key" in km23_s else "",
+                })
+            elif new_flag:
+                if id25:
+                    only25.add(_norm_id(id25))
+            else:
+                if id23 and id25:
+                    both_map[_norm_id(id25)] = str(id23).strip()
+
+    wb.close()
+    return both_map, only25, only23
+
+def _load_2023_details(target_ids):
+    """
+    Zoek target_ids op in alle 3 Details-sheets van het 2023-workbook.
+    Requirement-prefix: 'BASIC_' → Basic, 'IMPORTANT_' → Important, geen → Essential.
+    Geeft {req_id → {category, subcategory, assurance, requirement, key_meas}}.
+    """
+    found = {}
+    if not CYFUN23_SRC.exists():
+        return found
+
+    wb = load_workbook(str(CYFUN23_SRC), read_only=True, data_only=True)
+
+    # ESSENTIAL Details eerst: heeft expliciete BASIC_/IMPORTANT_ prefixes voor alle niveaus.
+    # Daarna IMPORTANT Details en BASIC Details als fallback voor controls die enkel daar staan.
+    # Als een control geen prefix heeft: niveau = wat de sheet aangeeft (Essential/Important/Basic).
+    sheet_default = {
+        "ESSENTIAL Details": "Essential",
+        "IMPORTANT Details": "Important",
+        "BASIC Details":     "Basic",
+    }
+    for sheet in ["ESSENTIAL Details", "IMPORTANT Details", "BASIC Details"]:
+        ws = wb[sheet]
+        cur_cat, cur_sub = "", ""
+        for row in ws.iter_rows(min_row=3, values_only=True):
+            if row[1]: cur_cat = str(row[1]).strip()
+            if row[3]: cur_sub = str(row[3]).strip()
+            if not row[4]:
+                continue
+            req_str = str(row[4]).strip()
+            clean   = re.sub(r'^(BASIC_|IMPORTANT_)', '', req_str)
+            parts   = clean.split(":", 1)
+            req_id  = parts[0].strip()
+            if req_id not in target_ids or req_id in found:
+                continue
+            if req_str.startswith("BASIC_"):
+                level = "Basic"
+            elif req_str.startswith("IMPORTANT_"):
+                level = "Important"
+            else:
+                level = sheet_default[sheet]   # geen prefix → niveau van de sheet
+            req_text = f"{req_id}: {parts[1].strip()}" if len(parts) > 1 else req_str
+            km_raw   = str(row[2]).strip() if row[2] else ""
+            key_m    = "Key Measure" if "Key" in km_raw else ""
+            ctrl_l   = km_raw if "Control" in km_raw else ""
+            found[req_id] = {
+                "category":    cur_cat,
+                "subcategory": cur_sub,
+                "assurance":   level,
+                "requirement": req_text.replace("\n", " "),
+                "key_meas":    key_m,
+                "ctrl_linked": ctrl_l,
+            }
+
+    wb.close()
+    return found
+
+STATUS_STYLE = {
+    "Beide":      ("green_light",  "green"),
+    "Enkel 2025": ("blue_xlight",  "blue_mid"),
+    "Enkel 2023": ("orange_light", "orange"),
+}
+
+def _write_side(ws, data_row, col_start, vals6, assurance, row_bg, assurance_style):
+    """
+    Schrijf 6 datacellen (Category/Controls/KeyMeasure/Subcategory/Assurance/Requirement)
+    vanaf col_start. vals6=None schrijft lege cellen met rand.
+    """
+    bg_key, fg_key = assurance_style.get(assurance, ("white", "text"))
+    values = vals6 if vals6 is not None else [""] * 6
+    for i, val in enumerate(values):
+        col = col_start + i
+        pos = i + 1                  # 1=Cat 2=Ctrl 3=KM 4=Sub 5=Ass 6=Req
+        c = ws.cell(row=data_row, column=col, value=val if val else None)
+        c.border = border_all("grey_border")
+        if not val:
+            c.fill = fill(row_bg)
+            c.alignment = align("left", "top")
+        elif pos == 5:               # Assurance level
+            c.fill = fill(bg_key)
+            c.font = font(9, bold=True, color=fg_key)
+            c.alignment = align("center", "top")
+        elif pos == 3:               # Key Measure badge
+            c.fill = fill("accent_light")
+            c.font = font(9, bold=True, color="accent")
+            c.alignment = align("center", "top")
+        else:
+            c.fill = fill(row_bg)
+            c.font = font(9, color="text")
+            c.alignment = align("left", "top", wrap=True)
+
+def _write_versie(ws, data_row, status):
+    """Schrijf de Versie-cel (kolom G)."""
+    sbg, sfg = STATUS_STYLE.get(status, ("white", "text"))
+    c = ws.cell(row=data_row, column=COL_VERSIE, value=status)
+    c.border = border_all("grey_border")
+    c.fill = fill(sbg)
+    c.font = font(9, bold=True, color=sfg)
+    c.alignment = align("center", "top")
+
+def build_cyfun_controls(ws):
+    CYFUN_TABS = ["GOVERN", "IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]
+    # 6 kolomnamen per zijde
+    HDR_25 = ["Category",
+              "Controls linked to\nthe management aspects",
+              "Key Measure",
+              "Subcategory",
+              "Assurance level",
+              "Requirement"]
+    HDR_23 = ["Category (2023)",
+              "Controls linked (2023)",
+              "Key Measure (2023)",
+              "Subcategory (2023)",
+              "Assurance level (2023)",
+              "Requirement (2023)"]
+    # Kolombreedtes: 6×(2025) + Versie + 6×(2023)
+    COL_WIDTHS = [30, 24, 14, 36, 16, 90,   # A–F
+                  13,                         # G
+                  30, 24, 14, 36, 16, 90]     # H–M
+    N        = len(COL_WIDTHS)               # 13
+    LAST_COL = get_column_letter(N)
+    ASSURANCE_STYLE = {
+        "Basic":     ("green_light",  "green"),
+        "Important": ("yellow_light", "yellow"),
+        "Essential": ("red_light",    "red"),
+    }
+
+    # ── Mapping + 2023-details laden ─────────────────────────────────────────
+    both_map, only25_set, only23_meta = _load_all_mappings()
+    # Laad 2023-details voor ALLE gekoppelde IDs + only-2023
+    all_2023_ids = set(both_map.values()) | {d["id"] for d in only23_meta}
+    details_2023 = _load_2023_details(all_2023_ids)
+
+    # ── Opmaak ───────────────────────────────────────────────────────────────
+    no_gridlines(ws)
+    set_col_widths(ws, COL_WIDTHS)
+
+    # Rij 1: titelregel
+    ws.merge_cells(f"A1:{LAST_COL}1")
+    c = ws["A1"]
+    c.value = "CyFun 2025 + 2023 — Controls & Requirements (ESSENTIAL) — Vergelijking"
+    c.fill = fill("navy"); c.font = font(13, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[1].height = 34
+
+    # Rij 2: groepskoppen
+    GRP = 2
+    ws.row_dimensions[GRP].height = 22
+    lc25 = get_column_letter(COL_25_START + 5)
+    lc23 = get_column_letter(COL_23_START + 5)
+    ws.merge_cells(f"A{GRP}:{lc25}{GRP}")
+    c = ws[f"A{GRP}"]
+    c.value = "CyFun 2025"; c.fill = fill("navy")
+    c.font = font(10, bold=True, color="white"); c.alignment = align("center", "center")
+    c = ws.cell(row=GRP, column=COL_VERSIE, value="Versie")
+    c.fill = fill("grey_dark"); c.font = font(10, bold=True, color="white")
+    c.alignment = align("center", "center")
+    ws.merge_cells(f"H{GRP}:{lc23}{GRP}")
+    c = ws[f"H{GRP}"]
+    c.value = "CyFun 2023"; c.fill = fill("blue_mid")
+    c.font = font(10, bold=True, color="white"); c.alignment = align("center", "center")
+
+    # Rij 3: kolomkoppen
+    HDR = 3
+    ws.row_dimensions[HDR].height = 36
+    for i, h in enumerate(HDR_25):
+        c = ws.cell(row=HDR, column=COL_25_START + i, value=h)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
+    c = ws.cell(row=HDR, column=COL_VERSIE, value="Versie")
+    c.fill = fill("grey_dark"); c.font = font(10, bold=True, color="white")
+    c.alignment = align("center", "center"); c.border = border_all("grey_dark")
+    for i, h in enumerate(HDR_23):
+        c = ws.cell(row=HDR, column=COL_23_START + i, value=h)
+        c.fill = fill("blue_mid"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
+
+    ws.auto_filter.ref = f"A{HDR}:{LAST_COL}{HDR}"
+    ws.freeze_panes   = f"A{HDR + 1}"
+
+    if not CYFUN_SRC.exists():
+        ws[f"A{HDR+1}"].value = f"BESTAND NIET GEVONDEN: {CYFUN_SRC}"
+        return
+
+    # ── 2025 requirements ────────────────────────────────────────────────────
+    src_wb   = load_workbook(str(CYFUN_SRC), read_only=True, data_only=True)
+    data_row = HDR + 1
+
+    for tab in CYFUN_TABS:
+        if tab not in src_wb.sheetnames:
+            continue
+        src_ws  = src_wb[tab]
+        cur_cat = ""
+        cur_sub = ""
+        for row in src_ws.iter_rows(min_row=3, values_only=True):
+            if row[0] is not None:
+                cur_cat = str(row[0]).strip()
+                cur_sub = ""
+            if row[3] is not None:
+                cur_sub = str(row[3]).strip()
+            if row[5] is None:
+                continue
+            ctrl_linked = str(row[1]).strip() if (row[1] is not None and isinstance(row[1], str)) else ""
+            key_meas    = "Key Measure" if (row[2] is not None and "Key" in str(row[2])) else ""
+            assurance   = str(row[4]).strip() if row[4] is not None else ""
+            req_text    = str(row[5]).strip().replace("\n", " ")
+            req_id_norm = _norm_id(req_text.split(":")[0])
+
+            if req_id_norm in both_map:
+                status   = "Beide"
+                id23     = both_map[req_id_norm]
+                d23      = details_2023.get(id23, {})
+                vals_23  = [d23.get("category", ""),
+                            d23.get("ctrl_linked", ""),
+                            d23.get("key_meas",    ""),
+                            d23.get("subcategory", ""),
+                            d23.get("assurance",   ""),
+                            d23.get("requirement", "")]
+                ass_23   = d23.get("assurance", "")
+            else:
+                status   = "Enkel 2025"
+                vals_23  = None
+                ass_23   = ""
+
+            row_bg = "grey_light" if data_row % 2 == 0 else "white"
+            vals_25 = [cur_cat, ctrl_linked, key_meas, cur_sub, assurance, req_text]
+            _write_side(ws, data_row, COL_25_START, vals_25, assurance, row_bg, ASSURANCE_STYLE)
+            _write_versie(ws, data_row, status)
+            _write_side(ws, data_row, COL_23_START, vals_23, ass_23, row_bg, ASSURANCE_STYLE)
+            data_row += 1
+
+    src_wb.close()
+
+    # ── Scheidingsregel ──────────────────────────────────────────────────────
+    ws.merge_cells(f"A{data_row}:{LAST_COL}{data_row}")
+    c = ws.cell(row=data_row, column=1,
+                value="CyFun 2023 — Controls niet opgenomen in versie 2025  (Enkel 2023)")
+    c.fill = fill("orange"); c.font = font(11, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[data_row].height = 24
+    data_row += 1
+
+    # ── 2023-only requirements (A–F leeg, H–M gevuld) ────────────────────────
+    for meta in only23_meta:
+        rid    = meta["id"]
+        d      = details_2023.get(rid, {})
+        ass    = d.get("assurance",   "Essential")
+        vals_23 = [d.get("category",    f"(2023) {rid}"),
+                   meta["ctrl_linked"] or d.get("ctrl_linked", ""),
+                   meta["key_meas"]    or d.get("key_meas",    ""),
+                   d.get("subcategory", ""),
+                   ass,
+                   d.get("requirement", rid)]
+        row_bg = "grey_light" if data_row % 2 == 0 else "white"
+        _write_side(ws, data_row, COL_25_START, None,    "",  row_bg, ASSURANCE_STYLE)
+        _write_versie(ws, data_row, "Enkel 2023")
+        _write_side(ws, data_row, COL_23_START, vals_23, ass, row_bg, ASSURANCE_STYLE)
+        data_row += 1
+
+ws_cyfun = wb.create_sheet("CyFun Controls")
+build_cyfun_controls(ws_cyfun)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # OPSLAAN ALS XLSX + VBA INJECTEREN VIA WIN32COM → XLSM

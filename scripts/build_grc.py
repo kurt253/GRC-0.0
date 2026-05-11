@@ -444,6 +444,22 @@ TRANSLATIONS = [
 ]
 
 # ── VBA-macrocode ─────────────────────────────────────────────────────────────
+KWETS_SHEET_CODE = '''\
+Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
+    If Target.Cells.Count > 1 Then Exit Sub
+    If Target.Row < 3 Or Target.Column < 3 Then Exit Sub
+    Cancel = True
+    Dim sVal As String
+    sVal = ""
+    If Not IsError(Target.Value) Then sVal = CStr(Target.Value)
+    If sVal = ChrW(10004) Then
+        Target.Value = ""
+    Else
+        Target.Value = ChrW(10004)
+    End If
+End Sub
+'''
+
 INFO_ASSET_SHEET_CODE = '''\
 Private Sub Worksheet_Activate()
     Dim procWs As Worksheet
@@ -1434,6 +1450,297 @@ Sub ExporteerAlles()
     Application.ScreenUpdating = True
     MsgBox "Export opgeslagen:" & vbCrLf & exportPath, vbInformation, "GRC Export"
 End Sub
+
+' Refresh Kwetsbaarheden-matrix vanuit Access (kolommen=controls, rijen=vulns×CIA)
+Sub ImportKwetsbaarheden()
+    ' Layout:
+    '   Kolom A = Control ID (statisch), kolom B = Richtlijn (statisch)
+    '   Kolom C+ = 1 kolom per kwetsbaarheid (dynamisch)
+    '   Rij 2  = kwetsbaarheid-namen
+    '   Rij 3  = Vertrouwelijkheid (C) — ✔ als kwetsbaarheid C-impact heeft
+    '   Rij 4  = Integriteit (I)
+    '   Rij 5  = Beschikbaarheid (A)
+    '   Rij 6+ = 1 rij per control — ✔ in vuln-kolom als control remediëring biedt
+
+    Const COL_ID      As Integer = 1
+    Const COL_TITLE   As Integer = 2
+    Const COL_V_START As Integer = 3   ' eerste kwetsbaarheid-kolom
+    Const ROW_TITLE   As Integer = 1
+    Const ROW_VULN    As Integer = 2
+    Const ROW_C       As Integer = 3
+    Const ROW_I       As Integer = 4
+    Const ROW_A       As Integer = 5
+    Const ROW_DATA    As Integer = 6
+    Const COL_CF25    As Integer = 6   ' F = 2025 Requirement in CyFun Controls
+    Const COL_CF23    As Integer = 13  ' M = 2023 Requirement in CyFun Controls
+    Const ROW_CF_DATA As Integer = 4   ' eerste datarij in CyFun Controls
+
+    Dim fd As FileDialog
+    Dim dbPath As String
+    Dim conn As Object
+    Dim ws As Worksheet, wsCC As Worksheet, wsAfw As Worksheet
+    Dim rs As Object, rsCtrl As Object, rsLT As Object
+    Dim rr As Long, v As Integer
+    Dim ctrlRowMap As Object, refNrMap As Object
+    Dim rev23to25 As Object, afwList As Object
+    Dim lastRow As Long, lastCol As Long, nVuln As Integer, nMatched As Long
+
+    ' ── 0. Bestandkeuze ──────────────────────────────────────────────────────
+    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    fd.Title = "Selecteer de Access-database (kwetsbaarheden)"
+    fd.Filters.Clear
+    fd.Filters.Add "Access-bestanden", "*.accdb; *.mdb"
+    If fd.Show = False Then Exit Sub
+    dbPath = fd.SelectedItems(1)
+
+    Application.ScreenUpdating = False
+    Set conn = OpenAccess(dbPath)
+    If conn Is Nothing Then Application.ScreenUpdating = True: Exit Sub
+
+    Set ws = ThisWorkbook.Sheets("Kwetsbaarheden")
+
+    ' ── 1. Ctrl-rij-map: LCase(ID) → rijnummer ───────────────────────────────
+    Set ctrlRowMap = CreateObject("Scripting.Dictionary")
+    rr = ROW_DATA
+    Do While ws.Cells(rr, COL_ID).Value <> ""
+        Dim ck As String
+        ck = LCase(Trim(CStr(ws.Cells(rr, COL_ID).Value)))
+        If Not ctrlRowMap.Exists(ck) Then ctrlRowMap.Add ck, rr
+        rr = rr + 1
+    Loop
+
+    ' ── 2. Wis alle kolommen C+ (ook lege maar opgemaakte invoerkolommen) ───────
+    Dim usedEndCol As Long
+    usedEndCol = ws.UsedRange.Column + ws.UsedRange.Columns.Count - 1
+    If usedEndCol >= COL_V_START Then
+        On Error Resume Next
+        ws.Cells(ROW_TITLE, 1).MergeArea.UnMerge
+        On Error GoTo 0
+        ws.Range(ws.Cells(1, COL_V_START), ws.Cells(1, usedEndCol)).EntireColumn.Delete
+    End If
+    lastRow = ws.Cells(ws.Rows.Count, COL_ID).End(xlUp).Row
+
+    ' ── 3. 2023→2025 reverse mapping via CyFun Controls-sheet ─────────────────
+    Set rev23to25 = CreateObject("Scripting.Dictionary")
+    On Error Resume Next
+    Set wsCC = ThisWorkbook.Sheets("CyFun Controls")
+    On Error GoTo 0
+    If Not wsCC Is Nothing Then
+        Dim ccLast As Long
+        ccLast = Application.Max( _
+            wsCC.Cells(wsCC.Rows.Count, COL_CF25).End(xlUp).Row, _
+            wsCC.Cells(wsCC.Rows.Count, COL_CF23).End(xlUp).Row)
+        Dim rCC As Long
+        For rCC = ROW_CF_DATA To ccLast
+            Dim r25t As String, r23t As String
+            r25t = Trim(CStr(wsCC.Cells(rCC, COL_CF25).Value))
+            r23t = Trim(CStr(wsCC.Cells(rCC, COL_CF23).Value))
+            If r25t <> "" And r23t <> "" Then
+                Dim p25 As Integer, p23 As Integer
+                p25 = InStr(r25t, ":"): p23 = InStr(r23t, ":")
+                Dim i25 As String, i23 As String
+                i25 = LCase(Trim(IIf(p25 > 0, Left(r25t, p25 - 1), r25t)))
+                i23 = LCase(Trim(IIf(p23 > 0, Left(r23t, p23 - 1), r23t)))
+                If i23 <> "" And i25 <> "" And Not rev23to25.Exists(i23) Then
+                    rev23to25.Add i23, i25
+                End If
+            End If
+        Next rCC
+    End If
+
+    ' ── 4. RefNr → CyFun 2023 ID via T-CyFunEssentiel ────────────────────────
+    Set refNrMap = CreateObject("Scripting.Dictionary")
+    Set rsCtrl = CreateObject("ADODB.Recordset")
+    rsCtrl.Open "SELECT RefNr, Requirement FROM [T - CyFunEssentiel]", conn
+    Do While Not rsCtrl.EOF
+        Dim refNr As Long
+        refNr = CLng(rsCtrl.Fields("RefNr").Value)
+        Dim reqVal As String
+        reqVal = CStr(rsCtrl.Fields("Requirement").Value)
+        If Not refNrMap.Exists(refNr) Then refNrMap.Add refNr, reqVal
+        rsCtrl.MoveNext
+    Loop
+    rsCtrl.Close
+
+    ' ── 5. Kwetsbaarheden laden + kolommen opbouwen ───────────────────────────
+    Dim vulnIDs()  As Long
+    Dim vulnNames() As String
+    Dim vulnC()    As Boolean, vulnI() As Boolean, vulnA() As Boolean
+    Dim vulnCols() As Long
+    nVuln = 0
+    ReDim vulnIDs(0 To 99):   ReDim vulnNames(0 To 99)
+    ReDim vulnC(0 To 99):     ReDim vulnI(0 To 99):   ReDim vulnA(0 To 99)
+    ReDim vulnCols(0 To 99)
+
+    Set rs = CreateObject("ADODB.Recordset")
+    rs.Open "SELECT ID, Vulnerability, Confidentialiteit, Integriteit, " & _
+            "Beschikbaarheid FROM [T - Vulnerabilities] ORDER BY Reference", conn
+
+    Dim nextCol As Long
+    nextCol = COL_V_START
+
+    Do While Not rs.EOF And nVuln < 100
+        Dim vID As Long, vNm As String
+        Dim vC As Boolean, vI As Boolean, vA As Boolean
+        vID = CLng(rs.Fields("ID").Value)
+        vNm = CStr(rs.Fields("Vulnerability").Value)
+        vC  = CBool(rs.Fields("Confidentialiteit").Value)
+        vI  = CBool(rs.Fields("Integriteit").Value)
+        vA  = CBool(rs.Fields("Beschikbaarheid").Value)
+
+        vulnIDs(nVuln)   = vID
+        vulnNames(nVuln) = vNm
+        vulnC(nVuln) = vC: vulnI(nVuln) = vI: vulnA(nVuln) = vA
+        vulnCols(nVuln)  = nextCol
+
+        ' Kolombreedte instellen
+        ws.Columns(nextCol).ColumnWidth = 10
+
+        ' Rij 2: naam
+        With ws.Cells(ROW_VULN, nextCol)
+            .Value = vNm
+            .Interior.Color = IIf(nVuln Mod 2 = 0, RGB(208, 220, 243), RGB(255, 255, 255))
+            .Font.Bold = True: .Font.Size = 9
+            .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+            .WrapText = True
+            .Borders.LineStyle = xlContinuous: .Borders.Weight = xlThin
+        End With
+
+        ' Rij 3 (C), rij 4 (I), rij 5 (A): impact aanduiden
+        Dim cia As Integer
+        Dim ciaRows(1 To 3) As Integer
+        Dim ciaFlags(1 To 3) As Boolean
+        ciaRows(1) = ROW_C: ciaFlags(1) = vC
+        ciaRows(2) = ROW_I: ciaFlags(2) = vI
+        ciaRows(3) = ROW_A: ciaFlags(3) = vA
+        Dim ciaColors(1 To 3) As Long
+        ciaColors(1) = RGB(173, 216, 230)   ' blauw (C)
+        ciaColors(2) = RGB(198, 239, 206)   ' groen (I)
+        ciaColors(3) = RGB(255, 235, 156)   ' oranje (A)
+
+        For cia = 1 To 3
+            With ws.Cells(ciaRows(cia), nextCol)
+                If ciaFlags(cia) Then
+                    .Value = ChrW(10004)
+                    .Interior.Color = ciaColors(cia)
+                    .Font.Bold = True: .Font.Size = 9
+                Else
+                    .Value = ""
+                    .Interior.Color = RGB(217, 217, 217)
+                End If
+                .HorizontalAlignment = xlCenter: .VerticalAlignment = xlCenter
+                .Borders.LineStyle = xlContinuous: .Borders.Weight = xlThin
+            End With
+        Next cia
+
+        ' Wis eventuele ✔-marks in data-kolom (bij heruitvoering)
+        If lastRow >= ROW_DATA Then
+            ws.Range(ws.Cells(ROW_DATA, nextCol), _
+                     ws.Cells(lastRow, nextCol)).ClearContents
+        End If
+
+        nextCol = nextCol + 1
+        nVuln = nVuln + 1
+        rs.MoveNext
+    Loop
+    rs.Close
+
+    ' ── 6. Titel-merge bijwerken ──────────────────────────────────────────────
+    Dim lastVulnCol As Long
+    lastVulnCol = nextCol - 1
+    If lastVulnCol >= COL_V_START Then
+        ws.Range(ws.Cells(ROW_TITLE, 1), ws.Cells(ROW_TITLE, lastVulnCol)).Merge
+        ws.Cells(ROW_TITLE, 1).HorizontalAlignment = xlLeft
+    End If
+
+    ' ── 7. LT koppelingen → ✔ plaatsen in control-rijen ─────────────────────
+    Set afwList = CreateObject("Scripting.Dictionary")
+    nMatched = 0
+
+    Set rsLT = CreateObject("ADODB.Recordset")
+    rsLT.Open "SELECT Vulnerability, CyFunControl " & _
+              "FROM [LT -  Vulnerability to control - fixed]", conn
+
+    Do While Not rsLT.EOF
+        Dim vulnId As Long, ctrlRef As Long
+        vulnId  = CLng(rsLT.Fields("Vulnerability").Value)
+        ctrlRef = CLng(rsLT.Fields("CyFunControl").Value)
+
+        If refNrMap.Exists(ctrlRef) Then
+            Dim id23v As String
+            id23v = LCase(Trim(CStr(refNrMap.Item(ctrlRef))))
+
+            Dim id25v As String
+            id25v = IIf(rev23to25.Exists(id23v), CStr(rev23to25.Item(id23v)), id23v)
+
+            Dim ctrlRow As Long
+            ctrlRow = 0
+            If ctrlRowMap.Exists(id25v) Then
+                ctrlRow = CLng(ctrlRowMap.Item(id25v))
+                nMatched = nMatched + 1
+            End If
+
+            For v = 0 To nVuln - 1
+                If vulnIDs(v) = vulnId Then
+                    If ctrlRow > 0 Then
+                        ' ✔ in de kwetsbaarheid-kolom op de control-rij
+                        With ws.Cells(ctrlRow, vulnCols(v))
+                            .Value = ChrW(10004)
+                            .Interior.Color = RGB(198, 239, 206)
+                            .HorizontalAlignment = xlCenter
+                            .Font.Size = 10
+                        End With
+                    Else
+                        Dim afwK As String
+                        afwK = vulnNames(v) & "|" & id23v
+                        If Not afwList.Exists(afwK) Then
+                            Dim cs As String
+                            cs = ""
+                            If vulnC(v) Then cs = cs & "C"
+                            If vulnI(v) Then cs = cs & "I"
+                            If vulnA(v) Then cs = cs & "A"
+                            afwList.Add afwK, Array(vulnNames(v), cs, id23v)
+                        End If
+                    End If
+                    Exit For
+                End If
+            Next v
+        End If
+        rsLT.MoveNext
+    Loop
+    rsLT.Close
+    conn.Close
+
+    ' ── 8. Afwijkingen-sheet bijwerken ────────────────────────────────────────
+    On Error Resume Next
+    Set wsAfw = ThisWorkbook.Sheets("Afwijkingen")
+    On Error GoTo 0
+    If wsAfw Is Nothing Then
+        Set wsAfw = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsAfw.Name = "Afwijkingen"
+    End If
+
+    Dim aLastRow As Long
+    aLastRow = wsAfw.Cells(wsAfw.Rows.Count, 1).End(xlUp).Row
+    If aLastRow >= 3 Then wsAfw.Rows("3:" & aLastRow).ClearContents
+
+    Dim aRow As Long
+    aRow = 3
+    Dim afwKey2 As Variant
+    For Each afwKey2 In afwList.Keys
+        Dim info As Variant
+        info = afwList.Item(afwKey2)
+        wsAfw.Cells(aRow, 1).Value = info(0)
+        wsAfw.Cells(aRow, 2).Value = info(1)
+        wsAfw.Cells(aRow, 3).Value = info(2)
+        wsAfw.Cells(aRow, 4).Value = "Control bestaat enkel in CyFun 2023 — geen 2025 equivalent"
+        aRow = aRow + 1
+    Next afwKey2
+
+    Application.ScreenUpdating = True
+    MsgBox "Geladen: " & nVuln & " kwetsbaarheden, " & nMatched & " matches, " & _
+           afwList.Count & " afwijkingen.", vbInformation, "GRC Import"
+End Sub
 '''
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2107,6 +2414,296 @@ cur_ref = ref_dim_table(ws_ref, cur_ref, "ref_section_conf",  "ref_conf_subtitle
                          ["ref_conf_1","ref_conf_2","ref_conf_3","ref_conf_4","ref_conf_5"])
 
 
+# ── Kwetsbaarheden sheet ─────────────────────────────────────────────────────
+def _load_kwets_db():
+    """Laadt kwetsbaarheden + control-links uit Access DB.
+    Retourneert (vulns, ctrl_links_2025, unmatched_23ids):
+      vulns            = [(id, name, C_bool, I_bool, A_bool), ...]
+      ctrl_links_2025  = {vuln_id: set_of_2025_req_ids}   — via 2023→2025 mapping
+      unmatched_23ids  = {norm_2023_id}   — 2023 IDs zonder 2025 equivalent
+    """
+    DB_PATH = Path(__file__).parent.parent / "data" / "Import" / "MNMTool - SocSec.accdb"
+    if not DB_PATH.exists():
+        print(f"[kwetsbaarheden] Access DB niet gevonden: {DB_PATH}")
+        return [], {}, set()
+    try:
+        import pyodbc
+        conn = pyodbc.connect(
+            f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={DB_PATH};"
+        )
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ID, Reference, Vulnerability, Confidentialiteit, Integriteit, Beschikbaarheid "
+            "FROM [T - Vulnerabilities] ORDER BY Reference"
+        )
+        vulns = [(int(r[0]), str(r[2]), bool(r[3]), bool(r[4]), bool(r[5]))
+                 for r in cur.fetchall()]
+        cur.execute("SELECT RefNr, Requirement FROM [T - CyFunEssentiel]")
+        refnr_map = {int(r[0]): str(r[1]) for r in cur.fetchall()}
+        cur.execute(
+            "SELECT Vulnerability, CyFunControl "
+            "FROM [LT -  Vulnerability to control - fixed]"
+        )
+        raw_links = [(r[0], r[1]) for r in cur.fetchall()
+                     if r[0] is not None and r[1] is not None]
+        conn.close()
+    except Exception as e:
+        print(f"[kwetsbaarheden] DB-fout: {e}")
+        return [], {}, set()
+
+    # ── Bouw 2023→2025 reverse mapping via MAPPING_SRC ────────────────────────
+    # _load_all_mappings() geeft {norm_2025_id → "2023_id"} (both_map)
+    # We draaien dit om: {norm_2023_id → 2025_id}
+    rev_map = {}   # norm_2023_id → canonical 2025_id (string uit CYFUN_SRC)
+    try:
+        both_map, _, _ = _load_all_mappings()
+        for norm25, id23 in both_map.items():
+            n23 = re.sub(r'-(\d+)$', r'.\1', str(id23).strip().lower())
+            # norm25 is already normalized; de-normalize to get original 2025 ID
+            # We need the original (non-normalized) 2025 ID to match sheet headers.
+            # Store norm_2023 → norm_2025 (sheet headers are compared normalized)
+            rev_map[n23] = norm25
+    except Exception as e:
+        print(f"[kwetsbaarheden] mapping-fout: {e}")
+
+    # ── Verwerk LT-links: 2023 ID → 2025 ID via rev_map ──────────────────────
+    ctrl_links_2025 = {}
+    unmatched_23ids = set()
+    for vuln_id_raw, ctrl_ref_raw in raw_links:
+        vid = int(vuln_id_raw)
+        cid = int(ctrl_ref_raw)
+        id23 = refnr_map.get(cid)
+        if not id23:
+            continue
+        n23 = re.sub(r'-(\d+)$', r'.\1', str(id23).strip().lower())
+        if n23 in rev_map:
+            # Sla normalized 2025 ID op voor matching met sheet-headers
+            ctrl_links_2025.setdefault(vid, set()).add(rev_map[n23])
+        else:
+            unmatched_23ids.add(id23)
+            # Controleer ook of het ID al in 2025-formaat is (bijv. RefNr 219-227)
+            # door het direct op te slaan als norm
+            ctrl_links_2025.setdefault(vid, set()).add(n23)
+
+    return vulns, ctrl_links_2025, unmatched_23ids
+
+
+def build_kwetsbaarheden(ws):
+    """
+    Statische structuur — data wordt ENKEL via macro geladen (ImportKwetsbaarheden).
+
+    Kolom A = Control ID, kolom B = Richtlijn  (statisch vanuit CYFUN_SRC)
+    Kolom C+ = per kwetsbaarheid 1 kolom       (dynamisch, door macro)
+
+    Rij 1  : Titel
+    Rij 2  : "Control ID" | "Richtlijn" | [kwetsbaarheid-namen]
+    Rij 3  : "C" | "Vertrouwelijkheid"  | [✔ als kwetsbaarheid C-impact heeft]
+    Rij 4  : "I" | "Integriteit"        | [✔ als kwetsbaarheid I-impact heeft]
+    Rij 5  : "A" | "Beschikbaarheid"    | [✔ als kwetsbaarheid A-impact heeft]
+    Rij 6+ : ctrl_id | richtlijn        | [✔ als control remediëring biedt]
+    """
+    ROW_TITLE = 1
+    ROW_VULN  = 2
+    ROW_C     = 3
+    ROW_I     = 4
+    ROW_A     = 5
+    ROW_DATA  = 6
+    COL_ID    = 1   # A
+    COL_TITLE = 2   # B
+    CYFUN_TABS = ["GOVERN", "IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]
+    ASSURANCE_STYLE = {
+        "Basic":     ("green_light",  "green"),
+        "Important": ("yellow_light", "yellow"),
+        "Essential": ("red_light",    "red"),
+    }
+
+    no_gridlines(ws)
+
+    # ── Controls laden uit CYFUN_SRC (statische referentiedata) ──────────────
+    controls = []   # [(req_id, req_title, assurance), ...]
+    if CYFUN_SRC.exists():
+        src_wb = load_workbook(str(CYFUN_SRC), read_only=True, data_only=True)
+        for tab in CYFUN_TABS:
+            if tab not in src_wb.sheetnames:
+                continue
+            for row in src_wb[tab].iter_rows(min_row=3, values_only=True):
+                if row[5] is None:
+                    continue
+                assurance = str(row[4]).strip() if row[4] is not None else ""
+                req_text  = str(row[5]).strip().replace("\n", " ")
+                parts     = req_text.split(":", 1)
+                req_id    = parts[0].strip()
+                req_title = parts[1].strip() if len(parts) > 1 else req_text
+                controls.append((req_id, req_title, assurance))
+        src_wb.close()
+
+    N_TEMPLATE    = 5   # lege invoerkolommen voor manuele input
+    COL_INP_START = 3   # C
+    LAST_HDR_COL  = get_column_letter(COL_INP_START + N_TEMPLATE - 1)
+
+    # ── Kolombreedtes ─────────────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 15
+    ws.column_dimensions["B"].width = 65
+    for k in range(N_TEMPLATE):
+        ws.column_dimensions[get_column_letter(COL_INP_START + k)].width = 14
+
+    # ── Rij 1: titel (gemerged over A t/m laatste invoerkolom) ───────────────
+    ws.merge_cells(f"A1:{LAST_HDR_COL}1")
+    c = ws["A1"]
+    c.value = "Kwetsbaarheden — Remediëring via CyFun 2025 Controls  ·  dubbelklik op een cel om ✔ te plaatsen"
+    c.fill = fill("navy"); c.font = font(11, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[ROW_TITLE].height = 34
+
+    # ── Rij 2: "Control ID" / "Richtlijn" + lege invoerkoppen ────────────────
+    ws.row_dimensions[ROW_VULN].height = 55
+    for col, lbl in [(COL_ID, "Control ID"), (COL_TITLE, "Richtlijn")]:
+        c = ws.cell(row=ROW_VULN, column=col, value=lbl)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True)
+        c.border = border_all("navy")
+
+    # ── Rijen 3-5: C/I/A rijlabels ───────────────────────────────────────────
+    CIA_DEFS = [
+        (ROW_C, "C", "Vertrouwelijkheid", "blue_light",   "blue_mid"),
+        (ROW_I, "I", "Integriteit",       "green_light",  "green"),
+        (ROW_A, "A", "Beschikbaarheid",   "orange_light", "orange"),
+    ]
+    for row, short, full, bg, fg in CIA_DEFS:
+        ws.row_dimensions[row].height = 18
+        c = ws.cell(row=row, column=COL_ID, value=short)
+        c.fill = fill(bg); c.font = Font(name="Calibri", size=9, bold=True, color=C[fg])
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = border_all("grey_border")
+        c = ws.cell(row=row, column=COL_TITLE, value=full)
+        c.fill = fill("white"); c.font = Font(name="Calibri", size=9, color=C["text"])
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        c.border = border_all("grey_border")
+
+    # Bevroren venster: rijen 1-5 EN kolommen A-B altijd zichtbaar
+    ws.freeze_panes = "C6"
+
+    if not controls:
+        ws.cell(row=ROW_DATA, column=COL_ID,
+                value="CYFUN_SRC niet gevonden — controleer het pad")
+        return []
+
+    # ── Rijen 6+: controls (A = ID, B = richtlijn) — ✔ marks door macro ──────
+    _bdr = border_all("grey_border")
+    for j, (ctrl_id, ctrl_title, assurance) in enumerate(controls):
+        row    = ROW_DATA + j
+        row_bg = "grey_light" if j % 2 == 0 else "white"
+        bg_key, fg_key = ASSURANCE_STYLE.get(assurance, ("white", "text"))
+
+        c = ws.cell(row=row, column=COL_ID, value=ctrl_id)
+        c.fill = fill(bg_key)
+        c.font = Font(name="Calibri", size=9, bold=True, color=C[fg_key])
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        c.border = _bdr
+
+        c = ws.cell(row=row, column=COL_TITLE, value=ctrl_title)
+        c.fill = fill(row_bg)
+        c.font = Font(name="Calibri", size=9, color=C["text"])
+        c.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        c.border = _bdr
+
+        ws.row_dimensions[row].height = 30
+
+    # ── 5 lege invoerkolommen voor manuele input (C t/m G) ───────────────────
+    # Dikke linker scheidingslijn op col C, dunne randen op D-G
+    _thin   = Side(style="thin",   color=C["grey_border"])
+    _medium = Side(style="medium", color=C["navy"])
+    _align_inp = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    CIA_COLORS = [("blue_light", ROW_C), ("green_light", ROW_I), ("orange_light", ROW_A)]
+
+    for k in range(N_TEMPLATE):
+        col  = COL_INP_START + k
+        left = _medium if k == 0 else _thin
+
+        def _inp_bdr(left_side):
+            return Border(left=left_side, right=_thin, top=_thin, bottom=_thin)
+
+        # Rij 2: kwetsbaarheid-naam invoerveld (geel = actief invoerveld)
+        c = ws.cell(row=ROW_VULN, column=col)
+        c.fill = fill("yellow_light")
+        c.alignment = _align_inp
+        c.border = _inp_bdr(left)
+
+        # Rijen 3-5: CIA-impact invoervelden (gekleurde achtergrond)
+        for bg, row in CIA_COLORS:
+            c = ws.cell(row=row, column=col)
+            c.fill = fill(bg)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = _inp_bdr(left)
+
+        # Rijen 6+: control-koppeling invoervelden (wisselende achtergrond)
+        for j in range(len(controls)):
+            r      = ROW_DATA + j
+            row_bg = "grey_light" if j % 2 == 0 else "white"
+            c = ws.cell(row=r, column=col)
+            c.fill = fill(row_bg)
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = _inp_bdr(left)
+
+    ws.auto_filter.ref = "A2:B2"
+    return []
+
+
+def build_afwijkingen(ws, afw_rows):
+    """
+    Rapportagesheet: controls die in de Access DB als remediëring zijn gelinkt
+    maar NIET bestaan in de CyFun 2025 ESSENTIAL-set (Enkel-2023 controls).
+    """
+    ROW_TITLE = 1
+    ROW_HDR   = 2
+    ROW_DATA  = 3
+
+    no_gridlines(ws)
+
+    ws.column_dimensions["A"].width = 48
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 18
+    ws.column_dimensions["D"].width = 40
+
+    # Titel
+    ws.merge_cells("A1:D1")
+    c = ws["A1"]
+    c.value = "Afwijkingen — CyFun 2023 controls zonder 2025 equivalent"
+    c.fill = fill("orange"); c.font = font(13, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[ROW_TITLE].height = 34
+
+    # Kolomkoppen
+    headers = ["Kwetsbaarheid", "C / I / A", "Control ID (DB)", "Reden"]
+    for col, hdr in enumerate(headers, 1):
+        c = ws.cell(row=ROW_HDR, column=col, value=hdr)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True)
+        c.border = border_all("navy")
+    ws.row_dimensions[ROW_HDR].height = 30
+
+    if not afw_rows:
+        c = ws.cell(row=ROW_DATA, column=1,
+                    value="Geen afwijkingen — alle DB-controls bestaan in CyFun 2025.")
+        c.font = font(9, color="subtext"); c.alignment = align("left", "center")
+        return
+
+    for idx, (vname, cia_str, ctrl_id) in enumerate(afw_rows):
+        r = ROW_DATA + idx
+        row_bg = "grey_light" if idx % 2 == 0 else "white"
+        vals = [vname, cia_str, ctrl_id,
+                "Control bestaat enkel in CyFun 2023 — geen 2025 equivalent"]
+        for col, val in enumerate(vals, 1):
+            c = ws.cell(row=r, column=col, value=val)
+            c.fill = fill(row_bg)
+            c.font = font(9, color="text")
+            c.alignment = align("left", "center", wrap=(col == 1))
+            c.border = border_all("grey_border")
+        ws.row_dimensions[r].height = 18
+
+    ws.auto_filter.ref = "A2:D2"
+
 # ── CyFun Controls sheet ─────────────────────────────────────────────────────
 # Kolomindeling:  A–F = 2025 data  |  G = Versie  |  H–M = 2023 data
 COL_25_START = 1   # A
@@ -2433,6 +3030,12 @@ def build_cyfun_controls(ws):
 ws_cyfun = wb.create_sheet("CyFun Controls")
 build_cyfun_controls(ws_cyfun)
 
+ws_kwets = wb.create_sheet("Kwetsbaarheden")
+afw_rows = build_kwetsbaarheden(ws_kwets)
+
+ws_afw = wb.create_sheet("Afwijkingen")
+build_afwijkingen(ws_afw, afw_rows)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # OPSLAAN ALS XLSX + VBA INJECTEREN VIA WIN32COM → XLSM
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2502,6 +3105,17 @@ try:
     btn_diag.TextFrame.HorizontalAlignment = -4108
     btn_diag.TextFrame.VerticalAlignment   = -4108
     btn_diag.OnAction = "GRC_Macros.VeldenTonen"
+    # Kwetsbaarheden importeer-knop (oranje)
+    btn_kwets = ws_ie_com.Shapes.AddShape(1, 10, 410, 200, 34)
+    btn_kwets.Fill.ForeColor.RGB = int("B45309", 16)
+    btn_kwets.Line.Visible = False
+    btn_kwets.TextFrame.Characters().Text = "▶  Importeer Kwetsbaarheden"
+    btn_kwets.TextFrame.Characters().Font.Bold = True
+    btn_kwets.TextFrame.Characters().Font.Size = 11
+    btn_kwets.TextFrame.Characters().Font.Color = int("FFFFFF", 16)
+    btn_kwets.TextFrame.HorizontalAlignment = -4108
+    btn_kwets.TextFrame.VerticalAlignment   = -4108
+    btn_kwets.OnAction = "GRC_Macros.ImportKwetsbaarheden"
 
     # Maak UserForm "AssetPicker" aan
     uf = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm
@@ -2557,6 +3171,11 @@ try:
     dep_code_name = wb_com.Sheets("Dependent Assets").CodeName
     dep_mod = wb_com.VBProject.VBComponents(dep_code_name)
     dep_mod.CodeModule.AddFromString(DEP_ASSET_SHEET_CODE)
+
+    # Voeg BeforeDoubleClick toggle toe aan Kwetsbaarheden sheet module
+    kwets_code_name = wb_com.Sheets("Kwetsbaarheden").CodeName
+    kwets_mod = wb_com.VBProject.VBComponents(kwets_code_name)
+    kwets_mod.CodeModule.AddFromString(KWETS_SHEET_CODE)
 
     # Sla op als .xlsm
     wb_com.SaveAs(str(OUT.resolve()), FileFormat=52)   # 52 = xlOpenXMLWorkbookMacroEnabled

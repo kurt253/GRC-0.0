@@ -1482,7 +1482,7 @@ Sub ImportKwetsbaarheden()
     Dim rs As Object, rsCtrl As Object, rsLT As Object
     Dim rr As Long, v As Integer
     Dim ctrlRowMap As Object, refNrMap As Object
-    Dim rev23to25 As Object, afwList As Object
+    Dim rev23to25 As Object, enkel23Set As Object, afwList As Object
     Dim lastRow As Long, lastCol As Long, nVuln As Integer, nMatched As Long
 
     ' ── 0. Bestandkeuze ──────────────────────────────────────────────────────
@@ -1520,8 +1520,9 @@ Sub ImportKwetsbaarheden()
     End If
     lastRow = ws.Cells(ws.Rows.Count, COL_ID).End(xlUp).Row
 
-    ' ── 3. 2023→2025 reverse mapping via CyFun Controls-sheet ─────────────────
-    Set rev23to25 = CreateObject("Scripting.Dictionary")
+    ' ── 3. 2023→2025 reverse mapping + "Enkel 2023"-set via CyFun Controls-sheet ──
+    Set rev23to25  = CreateObject("Scripting.Dictionary")
+    Set enkel23Set = CreateObject("Scripting.Dictionary")
     On Error Resume Next
     Set wsCC = ThisWorkbook.Sheets("CyFun Controls")
     On Error GoTo 0
@@ -1536,13 +1537,21 @@ Sub ImportKwetsbaarheden()
             r25t = Trim(CStr(wsCC.Cells(rCC, COL_CF25).Value))
             r23t = Trim(CStr(wsCC.Cells(rCC, COL_CF23).Value))
             If r25t <> "" And r23t <> "" Then
+                ' "Beide"-rij: voeg toe aan reverse mapping
                 Dim p25 As Integer, p23 As Integer
                 p25 = InStr(r25t, ":"): p23 = InStr(r23t, ":")
                 Dim i25 As String, i23 As String
-                i25 = LCase(Trim(IIf(p25 > 0, Left(r25t, p25 - 1), r25t)))
-                i23 = LCase(Trim(IIf(p23 > 0, Left(r23t, p23 - 1), r23t)))
+                i25 = LCase(Trim(Replace(IIf(p25 > 0, Left(r25t, p25 - 1), r25t), Chr(9), "")))
+                i23 = NormId23(r23t)
                 If i23 <> "" And i25 <> "" And Not rev23to25.Exists(i23) Then
                     rev23to25.Add i23, i25
+                End If
+            ElseIf r25t = "" And r23t <> "" Then
+                ' "Enkel 2023"-rij: registreer het 2023-ID in enkel23Set
+                Dim e23 As String
+                e23 = NormId23(r23t)
+                If e23 <> "" And Not enkel23Set.Exists(e23) Then
+                    enkel23Set.Add e23, True
                 End If
             End If
         Next rCC
@@ -1668,7 +1677,7 @@ Sub ImportKwetsbaarheden()
 
         If refNrMap.Exists(ctrlRef) Then
             Dim id23v As String
-            id23v = LCase(Trim(CStr(refNrMap.Item(ctrlRef))))
+            id23v = NormId23(CStr(refNrMap.Item(ctrlRef)))
 
             Dim id25v As String
             id25v = IIf(rev23to25.Exists(id23v), CStr(rev23to25.Item(id23v)), id23v)
@@ -1699,7 +1708,13 @@ Sub ImportKwetsbaarheden()
                             If vulnC(v) Then cs = cs & "C"
                             If vulnI(v) Then cs = cs & "I"
                             If vulnA(v) Then cs = cs & "A"
-                            afwList.Add afwK, Array(vulnNames(v), cs, id23v)
+                            Dim reden As String
+                            If enkel23Set.Exists(id23v) Then
+                                reden = "Enkel in 2023"
+                            Else
+                                reden = "Niet gevonden"
+                            End If
+                            afwList.Add afwK, Array(vulnNames(v), cs, id23v, reden)
                         End If
                     End If
                     Exit For
@@ -1733,7 +1748,7 @@ Sub ImportKwetsbaarheden()
         wsAfw.Cells(aRow, 1).Value = info(0)
         wsAfw.Cells(aRow, 2).Value = info(1)
         wsAfw.Cells(aRow, 3).Value = info(2)
-        wsAfw.Cells(aRow, 4).Value = "Control bestaat enkel in CyFun 2023 — geen 2025 equivalent"
+        wsAfw.Cells(aRow, 4).Value = info(3)
         aRow = aRow + 1
     Next afwKey2
 
@@ -1741,6 +1756,69 @@ Sub ImportKwetsbaarheden()
     MsgBox "Geladen: " & nVuln & " kwetsbaarheden, " & nMatched & " matches, " & _
            afwList.Count & " afwijkingen.", vbInformation, "GRC Import"
 End Sub
+
+' Normaliseert elke CyFun 2023 ID-string naar lowercase kort ID, ongeacht het formaat:
+'   "IMPORTANT_RS.CO-3.2: The organization..." → "rs.co-3.2"
+'   "RS.CO-3.2: The organization..."           → "rs.co-3.2"
+'   "RS.CO-3.2.a"                              → "rs.co-3.2"
+'   "rs.co-3-2"                                → "rs.co-3.2"
+'   "RS.CO-3.2"                                → "rs.co-3.2"
+Function NormId23(s As String) As String
+    Dim r As String
+    r = Trim(s)
+
+    ' Stap 1: strip niveau-prefix (IMPORTANT_, BASIC_, ESSENTIAL_)
+    If Left(LCase(r), 10) = "important_" Then
+        r = Mid(r, 11)
+    ElseIf Left(LCase(r), 6) = "basic_" Then
+        r = Mid(r, 7)
+    ElseIf Left(LCase(r), 10) = "essential_" Then
+        r = Mid(r, 11)
+    End If
+
+    ' Stap 2: strip beschrijving na dubbele punt ("RS.CO-3.2: tekst" → "RS.CO-3.2")
+    Dim colon As Integer
+    colon = InStr(r, ":")
+    If colon > 0 Then r = Trim(Left(r, colon - 1))
+
+    r = LCase(r)
+
+    ' Stap 3: strip trailing letter-extensie (.a tot .z)
+    Dim lastDot As Integer
+    lastDot = InStrRev(r, ".")
+    If lastDot > 0 Then
+        Dim suf As String
+        suf = Mid(r, lastDot + 1)
+        If Len(suf) = 1 And suf >= "a" And suf <= "z" Then
+            r = Left(r, lastDot - 1)
+        End If
+    End If
+
+    ' Stap 4: trailing -N → .N  (bv. "rs.co-3-2" → "rs.co-3.2")
+    Dim i As Integer, lastHyph As Integer
+    lastHyph = 0
+    For i = Len(r) To 1 Step -1
+        Dim ch As String
+        ch = Mid(r, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            ' nog in cijfer-zone, blijf zoeken
+        ElseIf ch = "-" Then
+            lastHyph = i
+            Exit For
+        Else
+            Exit For
+        End If
+    Next i
+    If lastHyph > 0 Then
+        Dim tail As String
+        tail = Mid(r, lastHyph + 1)
+        If Len(tail) > 0 Then
+            r = Left(r, lastHyph - 1) & "." & tail
+        End If
+    End If
+
+    NormId23 = r
+End Function
 '''
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2530,7 +2608,7 @@ def build_kwetsbaarheden(ws):
                 if row[5] is None:
                     continue
                 assurance = str(row[4]).strip() if row[4] is not None else ""
-                req_text  = str(row[5]).strip().replace("\n", " ")
+                req_text  = str(row[5]).strip().replace("\n", " ").replace("\t", "")
                 parts     = req_text.split(":", 1)
                 req_id    = parts[0].strip()
                 req_title = parts[1].strip() if len(parts) > 1 else req_text
@@ -2817,7 +2895,7 @@ def _load_2023_details(target_ids):
                 "category":    cur_cat,
                 "subcategory": cur_sub,
                 "assurance":   level,
-                "requirement": req_text.replace("\n", " "),
+                "requirement": req_text.replace("\n", " ").replace("\t", ""),
                 "key_meas":    key_m,
                 "ctrl_linked": ctrl_l,
             }
@@ -2973,7 +3051,7 @@ def build_cyfun_controls(ws):
             ctrl_linked = str(row[1]).strip() if (row[1] is not None and isinstance(row[1], str)) else ""
             key_meas    = "Key Measure" if (row[2] is not None and "Key" in str(row[2])) else ""
             assurance   = str(row[4]).strip() if row[4] is not None else ""
-            req_text    = str(row[5]).strip().replace("\n", " ")
+            req_text    = str(row[5]).strip().replace("\n", " ").replace("\t", "")
             req_id_norm = _norm_id(req_text.split(":")[0])
 
             if req_id_norm in both_map:

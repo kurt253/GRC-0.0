@@ -375,6 +375,7 @@ TRANSLATIONS = [
     ("dep_col_omschrijving", "Omschrijving",        "Description",             "Description"),
     ("dep_col_eigenaar",     "Eigenaar",            "Propriétaire",            "Owner"),
     ("dep_col_dienst",       "Dienst / Entiteit",   "Service / Entité",        "Department / Entity"),
+    ("dep_col_overarching",  "Overarching",         "Transversal",             "Overarching"),
     ("dep_col_opmerkingen",  "Opmerkingen",         "Remarques",               "Remarks"),
     ("dep_col_processes",
         "Gebruikt door processen",
@@ -504,10 +505,10 @@ Private Sub Worksheet_Activate()
     Me.Unprotect
     Set procWs = ThisWorkbook.Sheets("Processes")
     Set iaWs = ThisWorkbook.Sheets("Information Assets")
-    Me.Range("G6:I105").ClearContents
-    Me.Range("K6:K105").ClearContents
-    Me.Range("M6:M105").ClearContents
-    Me.Range("U6:W105").ClearContents
+    Me.Range("H6:J105").ClearContents
+    Me.Range("L6:L105").ClearContents
+    Me.Range("N6:N105").ClearContents
+    Me.Range("V6:X105").ClearContents
     For r = 6 To 105
         depNaam = CStr(Me.Cells(r, 2).Value)
         If depNaam <> "" Then
@@ -546,15 +547,15 @@ Private Sub Worksheet_Activate()
                     End If
                 End If
             Next c
-            Me.Cells(r, 7) = procList
-            Me.Cells(r, 8) = infoList
-            If maxConf > 0 Then Me.Cells(r, 9) = maxConf
-            If maxInt > 0 Then Me.Cells(r, 11) = maxInt
-            If maxAvail > 0 Then Me.Cells(r, 13) = maxAvail
+            Me.Cells(r, 8) = procList
+            Me.Cells(r, 9) = infoList
+            If maxConf > 0 Then Me.Cells(r, 10) = maxConf
+            If maxInt > 0 Then Me.Cells(r, 12) = maxInt
+            If maxAvail > 0 Then Me.Cells(r, 14) = maxAvail
             objConf = 0: objInt = 0: objAvail = 0
-            If IsNumeric(Me.Cells(r, 15).Value) Then objConf = CInt(Me.Cells(r, 15).Value)
-            If IsNumeric(Me.Cells(r, 17).Value) Then objInt = CInt(Me.Cells(r, 17).Value)
-            If IsNumeric(Me.Cells(r, 19).Value) Then objAvail = CInt(Me.Cells(r, 19).Value)
+            If IsNumeric(Me.Cells(r, 16).Value) Then objConf = CInt(Me.Cells(r, 16).Value)
+            If IsNumeric(Me.Cells(r, 18).Value) Then objInt = CInt(Me.Cells(r, 18).Value)
+            If IsNumeric(Me.Cells(r, 20).Value) Then objAvail = CInt(Me.Cells(r, 20).Value)
             gapConf = ""
             If objConf > 0 And maxConf > objConf And infoList <> "" Then
                 parts = Split(infoList, Chr(10))
@@ -574,7 +575,7 @@ Private Sub Worksheet_Activate()
                     End If
                 Next p
             End If
-            Me.Cells(r, 21) = gapConf
+            Me.Cells(r, 22) = gapConf
             gapInt = ""
             If objInt > 0 And maxInt > objInt And procList <> "" Then
                 parts = Split(procList, Chr(10))
@@ -594,7 +595,7 @@ Private Sub Worksheet_Activate()
                     End If
                 Next p
             End If
-            Me.Cells(r, 22) = gapInt
+            Me.Cells(r, 23) = gapInt
             gapAvail = ""
             If objAvail > 0 And maxAvail > objAvail And procList <> "" Then
                 parts = Split(procList, Chr(10))
@@ -614,12 +615,24 @@ Private Sub Worksheet_Activate()
                     End If
                 Next p
             End If
-            Me.Cells(r, 23) = gapAvail
+            Me.Cells(r, 24) = gapAvail
             If procList <> "" Or infoList <> "" Then Me.Rows(r).AutoFit
         End If
     Next r
     Me.Protect DrawingObjects:=True, Contents:=True, Scenarios:=True, UserInterfaceOnly:=True, AllowFiltering:=True, AllowSorting:=True
     Application.ScreenUpdating = True
+End Sub
+
+Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
+    If Target.Cells.Count > 1 Then Exit Sub
+    If Target.Row < 6 Or Target.Row > 105 Then Exit Sub
+    If Target.Column <> 6 Then Exit Sub
+    Cancel = True
+    If CStr(Target.Value) = ChrW(10004) Then
+        Target.Value = ""
+    Else
+        Target.Value = ChrW(10004)
+    End If
 End Sub
 
 Private Sub Worksheet_Change(ByVal Target As Range)
@@ -628,7 +641,7 @@ Private Sub Worksheet_Change(ByVal Target As Range)
     hasObjChange = False
     For Each cell In Target.Cells
         If cell.Row >= 6 And cell.Row <= 105 Then
-            If cell.Column = 15 Or cell.Column = 17 Or cell.Column = 19 Then
+            If cell.Column = 16 Or cell.Column = 18 Or cell.Column = 20 Then
                 hasObjChange = True
                 Exit For
             End If
@@ -653,18 +666,18 @@ Private Sub Worksheet_Change(ByVal Target As Range)
     For Each cell In Target.Cells
         r = cell.Row
         If r >= 6 And r <= 105 Then
-            If (cell.Column = 15 Or cell.Column = 17 Or cell.Column = 19) And Not rowDone(r) Then
+            If (cell.Column = 16 Or cell.Column = 18 Or cell.Column = 20) And Not rowDone(r) Then
                 rowDone(r) = True
-                procList = CStr(Me.Cells(r, 7).Value)
-                infoList = CStr(Me.Cells(r, 8).Value)
+                procList = CStr(Me.Cells(r, 8).Value)
+                infoList = CStr(Me.Cells(r, 9).Value)
                 maxConf = 0: maxInt = 0: maxAvail = 0
-                If IsNumeric(Me.Cells(r, 9).Value) Then maxConf = CInt(Me.Cells(r, 9).Value)
-                If IsNumeric(Me.Cells(r, 11).Value) Then maxInt = CInt(Me.Cells(r, 11).Value)
-                If IsNumeric(Me.Cells(r, 13).Value) Then maxAvail = CInt(Me.Cells(r, 13).Value)
+                If IsNumeric(Me.Cells(r, 10).Value) Then maxConf = CInt(Me.Cells(r, 10).Value)
+                If IsNumeric(Me.Cells(r, 12).Value) Then maxInt = CInt(Me.Cells(r, 12).Value)
+                If IsNumeric(Me.Cells(r, 14).Value) Then maxAvail = CInt(Me.Cells(r, 14).Value)
                 objConf = 0: objInt = 0: objAvail = 0
-                If IsNumeric(Me.Cells(r, 15).Value) Then objConf = CInt(Me.Cells(r, 15).Value)
-                If IsNumeric(Me.Cells(r, 17).Value) Then objInt = CInt(Me.Cells(r, 17).Value)
-                If IsNumeric(Me.Cells(r, 19).Value) Then objAvail = CInt(Me.Cells(r, 19).Value)
+                If IsNumeric(Me.Cells(r, 16).Value) Then objConf = CInt(Me.Cells(r, 16).Value)
+                If IsNumeric(Me.Cells(r, 18).Value) Then objInt = CInt(Me.Cells(r, 18).Value)
+                If IsNumeric(Me.Cells(r, 20).Value) Then objAvail = CInt(Me.Cells(r, 20).Value)
                 gapConf = ""
                 If objConf > 0 And maxConf > objConf And infoList <> "" Then
                     parts = Split(infoList, Chr(10))
@@ -684,7 +697,7 @@ Private Sub Worksheet_Change(ByVal Target As Range)
                         End If
                     Next p
                 End If
-                Me.Cells(r, 21) = gapConf
+                Me.Cells(r, 22) = gapConf
                 gapInt = ""
                 If objInt > 0 And maxInt > objInt And procList <> "" Then
                     parts = Split(procList, Chr(10))
@@ -704,7 +717,7 @@ Private Sub Worksheet_Change(ByVal Target As Range)
                         End If
                     Next p
                 End If
-                Me.Cells(r, 22) = gapInt
+                Me.Cells(r, 23) = gapInt
                 gapAvail = ""
                 If objAvail > 0 And maxAvail > objAvail And procList <> "" Then
                     parts = Split(procList, Chr(10))
@@ -724,7 +737,7 @@ Private Sub Worksheet_Change(ByVal Target As Range)
                         End If
                     Next p
                 End If
-                Me.Cells(r, 23) = gapAvail
+                Me.Cells(r, 24) = gapAvail
                 Me.Rows(r).AutoFit
             End If
         End If
@@ -778,6 +791,108 @@ Private Sub btnAnnuleer_Click()
 End Sub
 '''
 
+RARM_SHEET_CODE = '''\
+Private Sub Worksheet_Activate()
+    Application.EnableEvents = False
+    Application.ScreenUpdating = False
+    GRC_Macros.RefreshRARMKolommen
+    GRC_Macros.KleurAlleRARMKolommen
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+End Sub
+
+Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
+    If Target.Cells.Count > 1 Then Exit Sub
+    If Target.Row < 4 Then Exit Sub
+    If Target.Column < 4 Then Exit Sub
+    If CStr(Me.Cells(Target.Row, 1).Value) = "" Then Exit Sub
+    Cancel = True
+    If CStr(Target.Value) = ChrW(10004) Then
+        Target.Value = ""
+    Else
+        Target.Value = ChrW(10004)
+    End If
+End Sub
+
+Private Sub Worksheet_SelectionChange(ByVal Target As Range)
+    If Target.Cells.Count > 1 Then Exit Sub
+    If Target.Row <> 3 Then Exit Sub
+    If Target.Column < 4 Then Exit Sub
+    Application.EnableEvents = False
+    GRC_Macros.TonenVulnPicker Target.Column
+    Application.EnableEvents = True
+End Sub
+'''
+
+VULNPICKER_CODE = '''\
+Private Sub UserForm_Initialize()
+    Dim wsK As Worksheet, wsR As Worksheet
+    On Error Resume Next
+    Set wsK = ThisWorkbook.Sheets("Kwetsbaarheden")
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    On Error GoTo 0
+    If wsK Is Nothing Then Exit Sub
+
+    Dim daName As String
+    daName = ""
+    If Not wsR Is Nothing Then
+        daName = CStr(wsR.Cells(2, GRC_Macros.g_RARMCol).Value)
+    End If
+    Me.Caption = IIf(daName <> "", "Kwetsbaarheden voor: " & daName, "Kwetsbaarheden selecteren")
+    lblTitel.Caption = Me.Caption
+
+    lstVulns.Clear
+    Dim col As Long
+    col = 3
+    Do While wsK.Cells(2, col).Value <> ""
+        lstVulns.AddItem CStr(wsK.Cells(2, col).Value)
+        col = col + 1
+    Loop
+
+    If Not wsR Is Nothing Then
+        Dim curVal As String
+        curVal = CStr(wsR.Cells(3, GRC_Macros.g_RARMCol).Value)
+        If curVal <> "" Then
+            Dim parts() As String
+            parts = Split(curVal, ", ")
+            Dim i As Integer, j As Integer
+            For i = 0 To lstVulns.ListCount - 1
+                For j = 0 To UBound(parts)
+                    If lstVulns.List(i) = Trim(parts(j)) Then
+                        lstVulns.Selected(i) = True
+                    End If
+                Next j
+            Next i
+        End If
+    End If
+End Sub
+
+Private Sub btnOK_Click()
+    Dim wsR As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    On Error GoTo 0
+    If wsR Is Nothing Then Unload Me: Exit Sub
+
+    Dim result As String
+    result = ""
+    Dim i As Integer
+    For i = 0 To lstVulns.ListCount - 1
+        If lstVulns.Selected(i) Then
+            If result <> "" Then result = result & ", "
+            result = result & lstVulns.List(i)
+        End If
+    Next i
+    wsR.Cells(3, GRC_Macros.g_RARMCol).Value = result
+    Unload Me
+    GRC_Macros.KleurAlleRARMKolommen
+End Sub
+
+Private Sub btnAnnuleer_Click()
+    Unload Me
+End Sub
+'''
+
 PROC_SHEET_CODE = '''\
 Private Sub Worksheet_SelectionChange(ByVal Target As Range)
     If Target.Cells.Count = 1 Then
@@ -803,6 +918,7 @@ Public g_TargetRow As Long         ' Onthoudt welke rij in Processen geklikt wer
 Public g_ProcesNaam As String      ' Naam van het geselecteerde proces
 Public g_PickerSourceSheet As String ' Bronblad voor de picker (Informatieassets / Afhankelijke assets)
 Public g_PickerTargetCol As Long   ' Doelkolom in Processen (11 = info assets, 12 = afhankelijke assets)
+Public g_RARMCol As Long           ' Kolom in RARM-sheet waarop geklikt werd (vuln picker)
 
 ' GRC Tool v0.3 - Import & Export via MS Access (ADO)
 
@@ -1230,26 +1346,38 @@ Sub ImportAlles()
     End If
     On Error GoTo 0
     Set ws = ThisWorkbook.Sheets("Dependent Assets")
+    ws.Unprotect
     ws.Range("B6:E105").ClearContents
-    ws.Range("F6:F105").ClearContents
-    ws.Range("O6:O105").ClearContents
-    ws.Range("Q6:Q105").ClearContents
-    ws.Range("S6:S105").ClearContents
+    ws.Range("F6:F105").ClearContents   ' Overarching
+    ws.Range("G6:G105").ClearContents   ' Opmerkingen
+    ws.Range("P6:P105").ClearContents   ' Conf objective (col 16)
+    ws.Range("R6:R105").ClearContents   ' Int objective (col 18)
+    ws.Range("T6:T105").ClearContents   ' Avail objective (col 20)
     destRow = 6
     Do While Not rs.EOF And destRow <= 105
         ws.Cells(destRow, 2) = FieldVal(rs, "naam", "name", "nom", "afhankelijk", "dependent", "asset naam", "asset name")
         ws.Cells(destRow, 3) = FieldVal(rs, "omschrijving", "beschrijving", "description", "beschr", "omschr")
         ws.Cells(destRow, 4) = FieldVal(rs, "eigenaar", "owner", "propri" & Chr(233) & "taire", "verantwoordelijke")
         ws.Cells(destRow, 5) = FieldVal(rs, "dienst", "afdeling", "department", "service", "entiteit")
+        Dim oarchFld2 As Object
+        On Error Resume Next: Set oarchFld2 = rs.Fields("Overarching"): On Error GoTo 0
+        If Not oarchFld2 Is Nothing Then
+            If Not IsNull(oarchFld2.Value) Then
+                If CBool(oarchFld2.Value) Then ws.Cells(destRow, 6) = ChrW(10004)
+            End If
+            Set oarchFld2 = Nothing
+        End If
         nCls = MapCls(FieldVal(rs, "c-objective", "confidentiality objective", "conf objective", "c obj"))
-        If nCls > 0 Then ws.Cells(destRow, 15) = nCls
+        If nCls > 0 Then ws.Cells(destRow, 16) = nCls
         nCls = MapCls(FieldVal(rs, "i-objective", "integrity objective", "int objective", "i obj"))
-        If nCls > 0 Then ws.Cells(destRow, 17) = nCls
+        If nCls > 0 Then ws.Cells(destRow, 18) = nCls
         nCls = MapCls(FieldVal(rs, "a-objective", "availability objective", "avail objective", "a obj"))
-        If nCls > 0 Then ws.Cells(destRow, 19) = nCls
+        If nCls > 0 Then ws.Cells(destRow, 20) = nCls
         destRow = destRow + 1
         rs.MoveNext
     Loop
+    ws.Protect DrawingObjects:=True, Contents:=True, Scenarios:=True, _
+        UserInterfaceOnly:=True, AllowFiltering:=True, AllowSorting:=True
     rs.Close
     nDep = destRow - 6
 
@@ -1313,11 +1441,13 @@ Sub ImportAfhankelijkeAssets()
     Dim ws As Worksheet
     Dim nCls As Integer
     Set ws = ThisWorkbook.Sheets("Dependent Assets")
+    ws.Unprotect
     ws.Range("B6:E105").ClearContents
-    ws.Range("F6:F105").ClearContents
-    ws.Range("O6:O105").ClearContents
-    ws.Range("Q6:Q105").ClearContents
-    ws.Range("S6:S105").ClearContents
+    ws.Range("F6:F105").ClearContents   ' Overarching
+    ws.Range("G6:G105").ClearContents   ' Opmerkingen
+    ws.Range("P6:P105").ClearContents   ' Conf objective (col 16)
+    ws.Range("R6:R105").ClearContents   ' Int objective (col 18)
+    ws.Range("T6:T105").ClearContents   ' Avail objective (col 20)
 
     Dim destRow As Long
     destRow = 6
@@ -1326,15 +1456,26 @@ Sub ImportAfhankelijkeAssets()
         ws.Cells(destRow, 3) = FieldVal(rs, "omschrijving", "beschrijving", "description", "beschr", "omschr")
         ws.Cells(destRow, 4) = FieldVal(rs, "eigenaar", "owner", "propri" & Chr(233) & "taire", "verantwoordelijke")
         ws.Cells(destRow, 5) = FieldVal(rs, "dienst", "afdeling", "department", "service", "entiteit")
+        Dim oarchFld As Object
+        On Error Resume Next: Set oarchFld = rs.Fields("Overarching"): On Error GoTo 0
+        If Not oarchFld Is Nothing Then
+            If Not IsNull(oarchFld.Value) Then
+                If CBool(oarchFld.Value) Then ws.Cells(destRow, 6) = ChrW(10004)
+            End If
+            Set oarchFld = Nothing
+        End If
         nCls = MapCls(FieldVal(rs, "c-objective", "confidentiality objective", "conf objective", "c obj"))
-        If nCls > 0 Then ws.Cells(destRow, 15) = nCls
+        If nCls > 0 Then ws.Cells(destRow, 16) = nCls
         nCls = MapCls(FieldVal(rs, "i-objective", "integrity objective", "int objective", "i obj"))
-        If nCls > 0 Then ws.Cells(destRow, 17) = nCls
+        If nCls > 0 Then ws.Cells(destRow, 18) = nCls
         nCls = MapCls(FieldVal(rs, "a-objective", "availability objective", "avail objective", "a obj"))
-        If nCls > 0 Then ws.Cells(destRow, 19) = nCls
+        If nCls > 0 Then ws.Cells(destRow, 20) = nCls
         destRow = destRow + 1
         rs.MoveNext
     Loop
+
+    ws.Protect DrawingObjects:=True, Contents:=True, Scenarios:=True, _
+        UserInterfaceOnly:=True, AllowFiltering:=True, AllowSorting:=True
 
     rs.Close
 
@@ -1346,7 +1487,238 @@ Sub ImportAfhankelijkeAssets()
 
     conn.Close
     Application.ScreenUpdating = True
+
+    ' Herlaad RARM-kolommen zodat ze overeenkomen met de nieuwe DA-namen
+    RefreshRARMKolommen
+    KleurAlleRARMKolommen
+
     MsgBox destRow - 6 & " afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
+End Sub
+
+' Opent het UserForm VulnPicker voor kwetsbaarheid-selectie in RARM-sheet
+Sub TonenVulnPicker(targetCol As Long)
+    g_RARMCol = targetCol
+    VulnPicker.Show
+End Sub
+
+' Verzamelt control IDs die een ✔ hebben voor minstens één van de opgegeven kwetsbaarheden.
+' selVulns: kommagescheiden string met kwetsbaarheidsnamen (uit RARM rij 3)
+' Retourneert een Scripting.Dictionary {lowercase ctrl_id → True}
+Private Function GetMarkedCtrlIDs(wsK As Worksheet, selVulns As String) As Object
+    Const KWETS_ROW_HDR    As Long = 2
+    Const KWETS_ROW_DATA   As Long = 6
+    Const KWETS_COL_ID     As Long = 1
+    Const KWETS_COL_VSTART As Long = 3
+    Dim result As Object
+    Set result = CreateObject("Scripting.Dictionary")
+    If wsK Is Nothing Or selVulns = "" Then Set GetMarkedCtrlIDs = result: Exit Function
+    Dim kwetsLast As Long
+    kwetsLast = wsK.Cells(wsK.Rows.Count, KWETS_COL_ID).End(xlUp).Row
+    Dim selParts() As String
+    selParts = Split(selVulns, ", ")
+    Dim p As Integer, kc As Long, r As Long
+    Dim vName As String, vCol As Long, hdrVal As String, cv As String, cid As String
+    For p = 0 To UBound(selParts)
+        vName = Trim(selParts(p))
+        If vName <> "" Then
+            vCol = 0
+            For kc = KWETS_COL_VSTART To KWETS_COL_VSTART + 300
+                hdrVal = CStr(wsK.Cells(KWETS_ROW_HDR, kc).Value)
+                If hdrVal = "" Then Exit For
+                If hdrVal = vName Then vCol = kc: Exit For
+            Next kc
+            If vCol > 0 Then
+                For r = KWETS_ROW_DATA To kwetsLast
+                    cv = ""
+                    If Not IsError(wsK.Cells(r, vCol).Value) Then cv = CStr(wsK.Cells(r, vCol).Value)
+                    If cv = ChrW(10004) Then
+                        cid = LCase(Trim(CStr(wsK.Cells(r, KWETS_COL_ID).Value)))
+                        If cid <> "" And Not result.Exists(cid) Then result.Add cid, True
+                    End If
+                Next r
+            End If
+        End If
+    Next p
+    Set GetMarkedCtrlIDs = result
+End Function
+
+' Herlaadt DA-kolomkoppen in RARM vanuit de Dependent Assets sheet.
+' Leest col 2 (naam) en col 6 (overarching) van rijen 6-105.
+Sub RefreshRARMKolommen()
+    Const RARM_ROW_DA   As Long = 2
+    Const RARM_ROW_VULN As Long = 3
+    Const RARM_COL_DA   As Long = 4
+    Const DA_COL_NAAM   As Long = 2
+    Const DA_COL_OARCH  As Long = 6
+    Dim wsR As Worksheet, wsD As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    Set wsD = ThisWorkbook.Sheets("Dependent Assets")
+    On Error GoTo 0
+    If wsR Is Nothing Or wsD Is Nothing Then Exit Sub
+    ' Clear all existing DA header cells in row 2 (from col 4 to end of used range)
+    Dim lastCol As Long
+    lastCol = wsR.Cells(RARM_ROW_DA, wsR.Columns.Count).End(xlToLeft).Column
+    If lastCol >= RARM_COL_DA Then
+        wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), wsR.Cells(RARM_ROW_DA, lastCol + 5)).ClearContents
+        wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), wsR.Cells(RARM_ROW_DA, lastCol + 5)).Interior.ColorIndex = xlNone
+    End If
+    Dim col As Long
+    col = RARM_COL_DA
+    Dim r As Long, daNaam As String, isOarch As Boolean
+    For r = 6 To 105
+        daNaam = Trim(CStr(wsD.Cells(r, DA_COL_NAAM).Value))
+        If daNaam <> "" Then
+            isOarch = (Trim(CStr(wsD.Cells(r, DA_COL_OARCH).Value)) <> "")
+            With wsR.Cells(RARM_ROW_DA, col)
+                .Value = daNaam
+                .Font.Bold = True: .Font.Size = 10
+                .Font.Color = RGB(15, 43, 70)
+                .HorizontalAlignment = xlCenter
+                .VerticalAlignment = xlCenter
+                .WrapText = True
+                If isOarch Then
+                    .Interior.Color = RGB(180, 83, 9)   ' oranje = overarching
+                Else
+                    .Interior.Color = RGB(254, 249, 195) ' geel-licht = normaal
+                End If
+            End With
+            With wsR.Cells(RARM_ROW_VULN, col)
+                .Font.Italic = True: .Font.Size = 9
+                .Font.Color = RGB(100, 116, 139)
+                .Interior.Color = RGB(239, 246, 255)
+                .HorizontalAlignment = xlCenter
+                .VerticalAlignment = xlCenter
+                .WrapText = True
+            End With
+            If col >= RARM_COL_DA + 10 Then wsR.Columns(col).ColumnWidth = 22
+            col = col + 1
+        End If
+    Next r
+    ' Herlaad titel-merge (rij 1) zodat die altijd de volledige breedte dekt
+    Dim titleLast As Long
+    titleLast = col - 1
+    If titleLast < RARM_COL_DA + 9 Then titleLast = RARM_COL_DA + 9  ' min 10 DA-kolommen
+    On Error Resume Next
+    wsR.Cells(1, 1).MergeArea.UnMerge
+    On Error GoTo 0
+    wsR.Range(wsR.Cells(1, 1), wsR.Cells(1, titleLast)).Merge
+End Sub
+
+' Kleurt alle DA-kolommen in RARM door KleurRARMKolom aan te roepen per kolom.
+Sub KleurAlleRARMKolommen()
+    Const RARM_ROW_DA As Long = 2
+    Const RARM_COL_DA As Long = 4
+    Dim wsR As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    On Error GoTo 0
+    If wsR Is Nothing Then Exit Sub
+    Dim col As Long
+    col = RARM_COL_DA
+    Do While Trim(CStr(wsR.Cells(RARM_ROW_DA, col).Value)) <> ""
+        KleurRARMKolom col
+        col = col + 1
+    Loop
+End Sub
+
+' Kleurt één DA-kolom in RARM:
+'   - Volledige oranje (RGB 255,192,0) voor controls gelinkt aan eigen geselecteerde kwetsbaarheden.
+'   - Lichtgele spill (RGB 255,230,153) voor controls van overarching DA-kolommen,
+'     maar alleen als de targetCol zelf NIET overarching is.
+Sub KleurRARMKolom(targetCol As Long)
+    Const RARM_ROW_DA      As Long = 2
+    Const RARM_ROW_VULN    As Long = 3
+    Const RARM_ROW_DATA    As Long = 4
+    Const RARM_COL_ID      As Long = 1
+    Const RARM_COL_DA      As Long = 4
+    Const DA_COL_NAAM      As Long = 2
+    Const DA_COL_OARCH     As Long = 6
+
+    Dim wsR As Worksheet, wsK As Worksheet, wsD As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    Set wsK = ThisWorkbook.Sheets("Kwetsbaarheden")
+    Set wsD = ThisWorkbook.Sheets("Dependent Assets")
+    On Error GoTo 0
+    If wsR Is Nothing Or wsK Is Nothing Then Exit Sub
+
+    Dim rarmLast As Long
+    rarmLast = wsR.Cells(wsR.Rows.Count, RARM_COL_ID).End(xlUp).Row
+
+    ' Reset naar wisselend grijs/wit
+    Dim r As Long
+    For r = RARM_ROW_DATA To rarmLast
+        wsR.Cells(r, targetCol).Interior.Color = _
+            IIf((r - RARM_ROW_DATA) Mod 2 = 0, RGB(242, 242, 242), RGB(255, 255, 255))
+    Next r
+
+    ' Eigen kwetsbaarheden → volledige kleur
+    Dim selVal As String
+    selVal = Trim(CStr(wsR.Cells(RARM_ROW_VULN, targetCol).Value))
+    Dim ownMarked As Object
+    Set ownMarked = GetMarkedCtrlIDs(wsK, selVal)
+
+    Dim rid As String
+    For r = RARM_ROW_DATA To rarmLast
+        rid = LCase(Trim(CStr(wsR.Cells(r, RARM_COL_ID).Value)))
+        If ownMarked.Exists(rid) Then
+            wsR.Cells(r, targetCol).Interior.Color = RGB(255, 192, 0)
+        End If
+    Next r
+
+    ' Bepaal of targetCol zelf overarching is
+    Dim targetDaName As String
+    targetDaName = LCase(Trim(CStr(wsR.Cells(RARM_ROW_DA, targetCol).Value)))
+    Dim isOarch As Boolean
+    isOarch = False
+    If Not wsD Is Nothing And targetDaName <> "" Then
+        Dim daR As Long
+        For daR = 6 To 105
+            If LCase(Trim(CStr(wsD.Cells(daR, DA_COL_NAAM).Value))) = targetDaName Then
+                isOarch = (Trim(CStr(wsD.Cells(daR, DA_COL_OARCH).Value)) <> "")
+                Exit For
+            End If
+        Next daR
+    End If
+
+    ' Als targetCol niet overarching is → ook spill-kleur van overarching kolommen
+    If Not isOarch And Not wsD Is Nothing Then
+        Dim oarchMarked As Object
+        Set oarchMarked = CreateObject("Scripting.Dictionary")
+        Dim daCol As Long, oaDaName As String, oaVulns As String
+        Dim oaIDs As Object, key As Variant
+        daCol = RARM_COL_DA
+        Do While Trim(CStr(wsR.Cells(RARM_ROW_DA, daCol).Value)) <> ""
+            If daCol <> targetCol Then
+                oaDaName = LCase(Trim(CStr(wsR.Cells(RARM_ROW_DA, daCol).Value)))
+                For daR = 6 To 105
+                    If LCase(Trim(CStr(wsD.Cells(daR, DA_COL_NAAM).Value))) = oaDaName Then
+                        If Trim(CStr(wsD.Cells(daR, DA_COL_OARCH).Value)) <> "" Then
+                            oaVulns = Trim(CStr(wsR.Cells(RARM_ROW_VULN, daCol).Value))
+                            If oaVulns <> "" Then
+                                Set oaIDs = GetMarkedCtrlIDs(wsK, oaVulns)
+                                For Each key In oaIDs.Keys
+                                    If Not oarchMarked.Exists(key) Then oarchMarked.Add key, True
+                                Next key
+                            End If
+                        End If
+                        Exit For
+                    End If
+                Next daR
+            End If
+            daCol = daCol + 1
+        Loop
+
+        For r = RARM_ROW_DATA To rarmLast
+            rid = LCase(Trim(CStr(wsR.Cells(r, RARM_COL_ID).Value)))
+            If oarchMarked.Exists(rid) Then
+                If wsR.Cells(r, targetCol).Interior.Color <> RGB(255, 192, 0) Then
+                    wsR.Cells(r, targetCol).Interior.Color = RGB(255, 230, 153)
+                End If
+            End If
+        Next r
+    End If
 End Sub
 
 ' Opent het UserForm AssetPicker voor handmatige selectie van assets bij een proces
@@ -2199,36 +2571,37 @@ ws_asset.auto_filter.ref = f"A{HDR_ASSET}:{get_column_letter(N_ASSET)}{HDR_ASSET
 # ══════════════════════════════════════════════════════════════════════════════
 ws_dep = wb.create_sheet("Dependent Assets")
 
-# 24 kolommen: 1-8 basis + 9-14 Security Requirements + 15-20 Security Objectives + 21-23 Gap Analyse + 24 Commentaar
-DEP_WIDTHS = [5, 20, 30, 16, 16, 24, 35, 35, 4, 15, 4, 15, 4, 15, 4, 15, 4, 15, 4, 15, 35, 35, 35, 35]
+# 25 kolommen: 1-9 basis + 10-15 Security Requirements + 16-21 Security Objectives + 22-24 Gap Analyse + 25 Commentaar
+# Col 6 = Overarching (nieuw): boolean — niet-leeg betekent dat dit een organisatorische asset is.
+DEP_WIDTHS = [5, 20, 30, 16, 16, 10, 24, 35, 35, 4, 15, 4, 15, 4, 15, 4, 15, 4, 15, 4, 15, 35, 35, 35, 35]
 DEP_CLS_PAIRS = [
-    ("dep_col_conf",   9, 10),
-    ("dep_col_integ", 11, 12),
-    ("dep_col_avail", 13, 14),
+    ("dep_col_conf",  10, 11),
+    ("dep_col_integ", 12, 13),
+    ("dep_col_avail", 14, 15),
 ]
 HDR_DEP, DS_DEP, DE_DEP, N_DEP = build_cls_sheet(
     ws_dep, "dep_title", "dep_subtitle", "D",
     col_headers_before=[(k, i) for i, k in enumerate(
         ["dep_col_id","dep_col_naam","dep_col_omschrijving",
-         "dep_col_eigenaar","dep_col_dienst","dep_col_opmerkingen",
-         "dep_col_processes","dep_col_linked_info"], 1)],
+         "dep_col_eigenaar","dep_col_dienst","dep_col_overarching",
+         "dep_col_opmerkingen","dep_col_processes","dep_col_linked_info"], 1)],
     col_headers_after=[],
     widths=DEP_WIDTHS)
 
 # ── Groepskoppen rij 4: Security Requirements (paars) + Security Objectives (navy)
 ws_dep.row_dimensions[4].height = 22
-ws_dep.merge_cells("I4:N4")
-c = ws_dep.cell(row=4, column=9, value=t("dep_sec_req_header"))
+ws_dep.merge_cells("J4:O4")
+c = ws_dep.cell(row=4, column=10, value=t("dep_sec_req_header"))
 c.fill = fill("purple"); c.font = Font(name="Calibri", bold=True, size=10, color=C["white"])
 c.alignment = align("center", "center"); c.border = border_all("purple")
 
-ws_dep.merge_cells("O4:T4")
-c = ws_dep.cell(row=4, column=15, value=t("dep_sec_obj_header"))
+ws_dep.merge_cells("P4:U4")
+c = ws_dep.cell(row=4, column=16, value=t("dep_sec_obj_header"))
 c.fill = fill("navy"); c.font = Font(name="Calibri", bold=True, size=10, color=C["white"])
 c.alignment = align("center", "center"); c.border = border_all("navy")
 
-ws_dep.merge_cells("U4:W4")
-c = ws_dep.cell(row=4, column=21, value=t("dep_gap_header"))
+ws_dep.merge_cells("V4:X4")
+c = ws_dep.cell(row=4, column=22, value=t("dep_gap_header"))
 c.fill = fill("red"); c.font = Font(name="Calibri", bold=True, size=10, color=C["white"])
 c.alignment = align("center", "center"); c.border = border_all("red")
 
@@ -2244,45 +2617,51 @@ for r in range(DS_DEP, DE_DEP + 1):
     id_c.font = Font(name="Calibri", size=9, bold=True, color=C["subtext"])
     id_c.alignment = align("center", "center")
 
-# Cols 7-8 = computed door VBA — grijs/italic
+# Col 6 = Overarching — centre, groen lettertype als hint
 for r in range(DS_DEP, DE_DEP + 1):
-    for col_idx in [7, 8]:
+    c6 = ws_dep.cell(row=r, column=6)
+    c6.alignment = align("center", "center")
+    c6.font = Font(name="Calibri", size=11, color=C["green"])
+
+# Cols 8-9 = computed door VBA — grijs/italic
+for r in range(DS_DEP, DE_DEP + 1):
+    for col_idx in [8, 9]:
         cd = ws_dep.cell(row=r, column=col_idx)
         cd.fill = fill("grey_light")
         cd.font = Font(name="Calibri", size=9, italic=True, color=C["subtext"])
         cd.alignment = align("left", "top", wrap=True)
 
 # Security Requirements: code+label paren via add_cls_pairs (CF + formules)
-add_cls_pairs(ws_dep, [("dep_col_conf",   9, 10)], HDR_DEP, DS_DEP, DE_DEP)
-add_cls_pairs(ws_dep, [("dep_col_integ", 11, 12)], HDR_DEP, DS_DEP, DE_DEP)
-add_cls_pairs(ws_dep, [("dep_col_avail", 13, 14)], HDR_DEP, DS_DEP, DE_DEP)
+add_cls_pairs(ws_dep, [("dep_col_conf",  10, 11)], HDR_DEP, DS_DEP, DE_DEP)
+add_cls_pairs(ws_dep, [("dep_col_integ", 12, 13)], HDR_DEP, DS_DEP, DE_DEP)
+add_cls_pairs(ws_dep, [("dep_col_avail", 14, 15)], HDR_DEP, DS_DEP, DE_DEP)
 
 # Override kolomkoppen rij 5 naar paarse stijl (add_cls_pairs zette navy)
-for code_col in [9, 11, 13]:
+for code_col in [10, 12, 14]:
     c = ws_dep.cell(row=HDR_DEP, column=code_col)
     c.fill = fill("purple"); c.font = Font(name="Calibri", bold=True, size=10, color=C["white"])
     c.border = border_all("purple")
 
 # Code-cols Security Requirements → grijs (VBA vult automatisch in, niet bedoeld voor handmatige invoer)
 for r in range(DS_DEP, DE_DEP + 1):
-    for col_idx in [9, 11, 13]:
+    for col_idx in [10, 12, 14]:
         c = ws_dep.cell(row=r, column=col_idx)
         c.fill = fill("grey_light")
         c.font = Font(name="Calibri", size=9, bold=True, italic=True, color=C["subtext"])
         c.alignment = align("center", "center")
 
 # Security Objectives: 3×code+label paren (editeerbaar, navy — zelfde layout als requirements)
-add_cls_pairs(ws_dep, [("dep_col_conf",  15, 16)], HDR_DEP, DS_DEP, DE_DEP)
-add_cls_pairs(ws_dep, [("dep_col_integ", 17, 18)], HDR_DEP, DS_DEP, DE_DEP)
-add_cls_pairs(ws_dep, [("dep_col_avail", 19, 20)], HDR_DEP, DS_DEP, DE_DEP)
+add_cls_pairs(ws_dep, [("dep_col_conf",  16, 17)], HDR_DEP, DS_DEP, DE_DEP)
+add_cls_pairs(ws_dep, [("dep_col_integ", 18, 19)], HDR_DEP, DS_DEP, DE_DEP)
+add_cls_pairs(ws_dep, [("dep_col_avail", 20, 21)], HDR_DEP, DS_DEP, DE_DEP)
 
-# Gap Analyse-kolommen (21-23) — niet editeerbaar, VBA-berekend
-for col_idx, key in [(21, "dep_col_gap_conf"), (22, "dep_col_gap_integ"), (23, "dep_col_gap_avail")]:
+# Gap Analyse-kolommen (22-24) — niet editeerbaar, VBA-berekend
+for col_idx, key in [(22, "dep_col_gap_conf"), (23, "dep_col_gap_integ"), (24, "dep_col_gap_avail")]:
     c = ws_dep.cell(row=HDR_DEP, column=col_idx, value=t(key))
     c.fill = fill("red"); c.font = Font(name="Calibri", bold=True, size=10, color=C["white"])
     c.alignment = align("center", "center", wrap=True); c.border = border_all("red")
 for r in range(DS_DEP, DE_DEP + 1):
-    for col_idx in [21, 22, 23]:
+    for col_idx in [22, 23, 24]:
         c = ws_dep.cell(row=r, column=col_idx)
         c.fill = fill("grey_light")
         c.font = Font(name="Calibri", size=9, italic=True, color=C["subtext"])
@@ -2290,7 +2669,7 @@ for r in range(DS_DEP, DE_DEP + 1):
         c.border = border_all()
 
 # CF: gap-cel niet leeg → rood (er is een tekort)
-for gap_col in [21, 22, 23]:
+for gap_col in [22, 23, 24]:
     cl = get_column_letter(gap_col)
     rng = f"{cl}{DS_DEP}:{cl}{DE_DEP}"
     ws_dep.conditional_formatting.add(rng, FormulaRule(
@@ -2299,18 +2678,18 @@ for gap_col in [21, 22, 23]:
         font=Font(name="Calibri", bold=True, size=9, color=C["red"]),
     ))
 
-# Commentaar-kolom (24) — vrij tekstveld
-c = ws_dep.cell(row=HDR_DEP, column=24, value=t("dep_col_obj_commentaar"))
+# Commentaar-kolom (25) — vrij tekstveld
+c = ws_dep.cell(row=HDR_DEP, column=25, value=t("dep_col_obj_commentaar"))
 c.fill = fill("navy"); c.font = Font(name="Calibri", bold=True, size=10, color=C["white"])
 c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
 for r in range(DS_DEP, DE_DEP + 1):
-    c = ws_dep.cell(row=r, column=24)
+    c = ws_dep.cell(row=r, column=25)
     c.alignment = align("left", "top", wrap=True)
 
 # Celbeveiliging: standaard alles vergrendeld; ontgrendel alleen editeerbare kolommen
-# Editeerbaar: B-F (2-6) = basisgegevens, O-T (15-20) = objectives, X (24) = commentaar
-# Gap-kolommen U-W (21-23) zijn vergrendeld (VBA-berekend)
-EDITABLE_COLS = list(range(2, 7)) + list(range(15, 21)) + [24]
+# Editeerbaar: B-G (2-7) = basisgegevens incl. Overarching + Opmerkingen, P-U (16-21) = objectives, Y (25) = commentaar
+# Gap-kolommen V-X (22-24) zijn vergrendeld (VBA-berekend)
+EDITABLE_COLS = list(range(2, 8)) + list(range(16, 22)) + [25]
 for r in range(DS_DEP, DE_DEP + 1):
     for col_idx in EDITABLE_COLS:
         ws_dep.cell(row=r, column=col_idx).protection = Protection(locked=False)
@@ -2322,6 +2701,113 @@ ws_dep.protection.sort = False         # sorteren toegestaan
 ws_dep.freeze_panes = f"A{DS_DEP}"
 ws_dep.auto_filter.ref = f"A{HDR_DEP}:{get_column_letter(N_DEP)}{HDR_DEP}"
 
+
+def build_rarm(ws):
+    """
+    RARM — Risk Assessment & Remediation Matrix.
+    Kolommen: A=Control ID  B=Richtlijn  C=Assurance  D+=per Dependent Asset (dynamisch via macro)
+    Rijen:    1=Titel  2=DA-namen  3=Kwetsbaarheden-selector  4+=CyFun 2025 controls
+    """
+    ROW_DA       = 2
+    ROW_VULN     = 3
+    ROW_DATA     = 4
+    COL_ID       = 1
+    COL_TITLE    = 2
+    COL_ASS      = 3
+    COL_DA_START = 4
+    N_TEMPLATE   = 10
+
+    CYFUN_TABS = ["GOVERN", "IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]
+    ASS_STYLE  = {"Basic": ("green_light","green"), "Important": ("yellow_light","yellow"),
+                  "Essential": ("red_light","red")}
+    LAST_COL = get_column_letter(COL_DA_START + N_TEMPLATE - 1)
+
+    no_gridlines(ws)
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 60
+    ws.column_dimensions["C"].width = 13
+    for k in range(N_TEMPLATE):
+        ws.column_dimensions[get_column_letter(COL_DA_START + k)].width = 22
+
+    controls = []
+    if CYFUN_SRC.exists():
+        src_wb = load_workbook(str(CYFUN_SRC), read_only=True, data_only=True)
+        for tab in CYFUN_TABS:
+            if tab not in src_wb.sheetnames:
+                continue
+            for row in src_wb[tab].iter_rows(min_row=3, values_only=True):
+                if row[5] is None:
+                    continue
+                assurance = str(row[4]).strip() if row[4] is not None else ""
+                req_text  = str(row[5]).strip().replace("\n", " ").replace("\t", "")
+                parts     = req_text.split(":", 1)
+                req_id    = parts[0].strip()
+                req_title = parts[1].strip() if len(parts) > 1 else req_text
+                controls.append((req_id, req_title, assurance))
+        src_wb.close()
+
+    ws.merge_cells(f"A1:{LAST_COL}1")
+    c = ws["A1"]
+    c.value = "RARM — Risk Assessment & Remediation Matrix"
+    c.fill = fill("navy"); c.font = font(13, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[1].height = 34
+
+    ws.row_dimensions[2].height = 36
+    for col_idx, label in [(COL_ID, "Control ID"), (COL_TITLE, "Richtlijn"), (COL_ASS, "Assurance")]:
+        c = ws.cell(row=ROW_DA, column=col_idx, value=label)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
+    for k in range(N_TEMPLATE):
+        c = ws.cell(row=ROW_DA, column=COL_DA_START + k)
+        c.fill = fill("yellow_light"); c.font = font(10, bold=True)
+        c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
+
+    ws.row_dimensions[3].height = 28
+    for col_idx in [COL_ID, COL_TITLE, COL_ASS]:
+        c = ws.cell(row=ROW_VULN, column=col_idx)
+        c.fill = fill("grey_light"); c.border = border_all("grey_border")
+    for k in range(N_TEMPLATE):
+        c = ws.cell(row=ROW_VULN, column=COL_DA_START + k)
+        c.fill = fill("blue_xlight"); c.font = font(9, italic=True, color="subtext")
+        c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
+
+    thick = Side(border_style="medium", color=C["navy"])
+    for row_idx in range(1, ROW_DATA + len(controls) + 1):
+        cell = ws.cell(row=row_idx, column=COL_DA_START)
+        b = cell.border
+        cell.border = Border(left=thick, right=b.right, top=b.top, bottom=b.bottom)
+
+    ws.freeze_panes = "D4"
+
+    for i, (req_id, req_title, assurance) in enumerate(controls):
+        row_idx = ROW_DATA + i
+        bg_key, fg_key = ASS_STYLE.get(assurance, ("white", "text"))
+        row_bg = "grey_light" if i % 2 == 0 else "white"
+
+        c = ws.cell(row=row_idx, column=COL_ID, value=req_id)
+        c.fill = fill(bg_key); c.font = font(9, bold=True, color=fg_key)
+        c.alignment = align("center", "center"); c.border = border_all("grey_border")
+
+        c = ws.cell(row=row_idx, column=COL_TITLE, value=req_title)
+        c.fill = fill(row_bg); c.font = font(9)
+        c.alignment = align("left", "top", wrap=True); c.border = border_all("grey_border")
+        ws.row_dimensions[row_idx].height = 30
+
+        c = ws.cell(row=row_idx, column=COL_ASS, value=assurance)
+        c.fill = fill(bg_key); c.font = font(9, bold=True, color=fg_key)
+        c.alignment = align("center", "center"); c.border = border_all("grey_border")
+
+        for k in range(N_TEMPLATE):
+            c = ws.cell(row=row_idx, column=COL_DA_START + k)
+            c.fill = fill(row_bg); c.border = border_all("grey_border")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHEET: RARM
+# ══════════════════════════════════════════════════════════════════════════════
+ws_rarm = wb.create_sheet("RARM")
+build_rarm(ws_rarm)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHEET: Verantwoordelijken
@@ -3254,6 +3740,43 @@ try:
     kwets_code_name = wb_com.Sheets("Kwetsbaarheden").CodeName
     kwets_mod = wb_com.VBProject.VBComponents(kwets_code_name)
     kwets_mod.CodeModule.AddFromString(KWETS_SHEET_CODE)
+
+    # Maak UserForm "VulnPicker" aan (kwetsbaarheidselectie in RARM)
+    vp = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm
+    vp.Name = "VulnPicker"
+    vp.Properties("Caption").Value = "Kwetsbaarheden selecteren"
+    vp.Properties("Width").Value  = 380
+    vp.Properties("Height").Value = 400
+    vp_des = vp.Designer
+    # Label
+    lbl_vp = vp_des.Controls.Add("Forms.Label.1")
+    lbl_vp.Name = "lblTitel"; lbl_vp.Caption = "Kwetsbaarheden"
+    lbl_vp.Left = 8; lbl_vp.Top = 8; lbl_vp.Width = 340; lbl_vp.Height = 20
+    lbl_vp.Font.Bold = True
+    # ListBox
+    lst_vp = vp_des.Controls.Add("Forms.ListBox.1")
+    lst_vp.Name = "lstVulns"
+    lst_vp.Left = 8; lst_vp.Top = 34; lst_vp.Width = 340; lst_vp.Height = 280
+    lst_vp.MultiSelect = 1   # fmMultiSelectMulti
+    lst_vp.ListStyle  = 1   # fmListStyleOption (checkboxen)
+    # OK-knop
+    btn_vp_ok = vp_des.Controls.Add("Forms.CommandButton.1")
+    btn_vp_ok.Name = "btnOK"; btn_vp_ok.Caption = "OK"
+    btn_vp_ok.Left = 8; btn_vp_ok.Top = 326; btn_vp_ok.Width = 80; btn_vp_ok.Height = 28
+    btn_vp_ok.BackColor  = int("70AD47", 16)
+    btn_vp_ok.ForeColor  = int("FFFFFF", 16)
+    # Annuleer-knop
+    btn_vp_ann = vp_des.Controls.Add("Forms.CommandButton.1")
+    btn_vp_ann.Name = "btnAnnuleer"; btn_vp_ann.Caption = "Annuleer"
+    btn_vp_ann.Left = 268; btn_vp_ann.Top = 326; btn_vp_ann.Width = 80; btn_vp_ann.Height = 28
+    btn_vp_ann.BackColor = int("FF0000", 16)
+    btn_vp_ann.ForeColor = int("FFFFFF", 16)
+    vp.CodeModule.AddFromString(VULNPICKER_CODE)
+
+    # Voeg SelectionChange toe aan RARM sheet module
+    rarm_code_name = wb_com.Sheets("RARM").CodeName
+    rarm_mod = wb_com.VBProject.VBComponents(rarm_code_name)
+    rarm_mod.CodeModule.AddFromString(RARM_SHEET_CODE)
 
     # Sla op als .xlsm
     wb_com.SaveAs(str(OUT.resolve()), FileFormat=52)   # 52 = xlOpenXMLWorkbookMacroEnabled

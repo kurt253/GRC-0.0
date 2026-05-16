@@ -101,7 +101,6 @@ ASSET_TYPES = {
     "EN": ["Application", "Database", "Server", "Hardware", "Network Equipment",
            "Service", "Document", "Person", "Process", "Other"],
 }
-
 # ── Vertalingstabel ───────────────────────────────────────────────────────────
 TRANSLATIONS = [
     # Paginatitel Config / Chrome
@@ -354,6 +353,14 @@ TRANSLATIONS = [
         "Selecteer de Access-database en importeer processen, informatieassets én afhankelijke assets in één stap. Koppelingen worden automatisch mee ingeladen.",
         "Sélectionnez la base de données Access et importez processus, actifs informationnels et actifs dépendants en une seule étape. Les liens sont chargés automatiquement.",
         "Select the Access database and import processes, information assets and dependent assets in one step. Links are loaded automatically."),
+    ("ie_import_links_btn",
+        "Importeer Links DA / Kwetsbaarheden",
+        "Importer liens actifs dépendants / vulnérabilités",
+        "Import DA / Vulnerability Links"),
+    ("ie_import_links_desc",
+        "Voer dit uit NA de import van kwetsbaarheden. Leest de koppelingen tussen afhankelijke assets en kwetsbaarheden uit de Access-database en vult de RARM-tab aan.",
+        "À exécuter APRÈS l'import des vulnérabilités. Lit les liens entre actifs dépendants et vulnérabilités depuis la base Access et complète l'onglet RARM.",
+        "Run this AFTER importing vulnerabilities. Reads links between dependent assets and vulnerabilities from the Access database and fills in the RARM tab."),
     ("ie_export_btn",      "Exporteer alle gegevens",     "Exporter toutes les données",   "Export all data"),
     ("ie_export_desc",
         "Exporteert de bladen Processen, Informatieassets en Verantwoordelijken naar een nieuw Excel-bestand.",
@@ -795,7 +802,7 @@ RARM_SHEET_CODE = '''\
 Private Sub Worksheet_Activate()
     Application.EnableEvents = False
     Application.ScreenUpdating = False
-    GRC_Macros.RefreshRARMKolommen
+    GRC_Macros.SyncRARMKolommen
     GRC_Macros.KleurAlleRARMKolommen
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -817,7 +824,7 @@ End Sub
 Private Sub Worksheet_SelectionChange(ByVal Target As Range)
     If Target.Cells.Count > 1 Then Exit Sub
     If Target.Row <> 3 Then Exit Sub
-    If Target.Column < 4 Then Exit Sub
+    If Target.Column < 5 Then Exit Sub
     Application.EnableEvents = False
     GRC_Macros.TonenVulnPicker Target.Column
     Application.EnableEvents = True
@@ -841,48 +848,123 @@ Private Sub UserForm_Initialize()
     Me.Caption = IIf(daName <> "", "Kwetsbaarheden voor: " & daName, "Kwetsbaarheden selecteren")
     lblTitel.Caption = Me.Caption
 
-    lstVulns.Clear
-    Dim col As Long
-    col = 3
-    Do While wsK.Cells(2, col).Value <> ""
-        lstVulns.AddItem CStr(wsK.Cells(2, col).Value)
-        col = col + 1
-    Loop
-
+    ' Parse existing selection into Dictionary: vname -> probability (1-4)
+    ' Storage format: "VulnName (2), VulnName2 (3)"
+    Dim selDict As Object
+    Set selDict = CreateObject("Scripting.Dictionary")
     If Not wsR Is Nothing Then
         Dim curVal As String
         curVal = CStr(wsR.Cells(3, GRC_Macros.g_RARMCol).Value)
         If curVal <> "" Then
             Dim parts() As String
             parts = Split(curVal, ", ")
-            Dim i As Integer, j As Integer
-            For i = 0 To lstVulns.ListCount - 1
-                For j = 0 To UBound(parts)
-                    If lstVulns.List(i) = Trim(parts(j)) Then
-                        lstVulns.Selected(i) = True
+            Dim pi As Integer
+            For pi = 0 To UBound(parts)
+                Dim entry As String
+                entry = Trim(parts(pi))
+                If entry <> "" Then
+                    Dim parenOpen As Integer
+                    parenOpen = InStrRev(entry, " (")
+                    If parenOpen > 0 Then
+                        Dim vKey As String, pNum As String
+                        vKey = Left(entry, parenOpen - 1)
+                        pNum = Mid(entry, parenOpen + 2, Len(entry) - parenOpen - 2)
+                        selDict(vKey) = pNum
+                    Else
+                        selDict(entry) = "2"
                     End If
-                Next j
-            Next i
+                End If
+            Next pi
         End If
     End If
+
+    ' Dynamically add CheckBox + ComboBox (1-4) rows to frmVulns
+    Dim rowTop As Long
+    rowTop = 4
+    Dim col As Long
+    col = 3
+    Do While wsK.Cells(2, col).Value <> ""
+        Dim vName As String
+        vName = CStr(wsK.Cells(2, col).Value)
+
+        Dim chk As Object
+        Set chk = frmVulns.Controls.Add("Forms.CheckBox.1")
+        chk.Name = "chk_" & col
+        chk.Caption = vName
+        chk.Tag = vName
+        chk.Left = 4
+        chk.Top = rowTop
+        chk.Width = 220
+        chk.Height = 18
+        chk.Font.Size = 9
+
+        Dim cmb As Object
+        Set cmb = frmVulns.Controls.Add("Forms.ComboBox.1")
+        cmb.Name = "cmb_" & col
+        cmb.Tag = vName
+        cmb.Left = 228
+        cmb.Top = rowTop
+        cmb.Width = 162
+        cmb.Height = 18
+        cmb.Font.Size = 9
+        cmb.Style = 2   ' fmStyleDropDownList
+        cmb.AddItem "1 - Not probable"
+        cmb.AddItem "2 - Low probability"
+        cmb.AddItem "3 - Medium probability"
+        cmb.AddItem "4 - High probability"
+        cmb.ListIndex = 1  ' default = 2 (Low probability)
+
+        Dim isSelected As Boolean
+        isSelected = False
+        If selDict.Exists(vName) Then
+            isSelected = True
+            Dim savedProb As String
+            savedProb = CStr(selDict(vName))
+            Dim savedIdx As Integer
+            savedIdx = CInt(savedProb) - 1
+            If savedIdx >= 0 And savedIdx <= 3 Then cmb.ListIndex = savedIdx
+        End If
+        chk.Value = isSelected
+
+        rowTop = rowTop + 22
+        col = col + 1
+    Loop
+
+    frmVulns.ScrollHeight = rowTop + 4
 End Sub
 
 Private Sub btnOK_Click()
-    Dim wsR As Worksheet
+    Dim wsR As Worksheet, wsK As Worksheet
     On Error Resume Next
     Set wsR = ThisWorkbook.Sheets("RARM")
+    Set wsK = ThisWorkbook.Sheets("Kwetsbaarheden")
     On Error GoTo 0
     If wsR Is Nothing Then Unload Me: Exit Sub
 
     Dim result As String
     result = ""
-    Dim i As Integer
-    For i = 0 To lstVulns.ListCount - 1
-        If lstVulns.Selected(i) Then
-            If result <> "" Then result = result & ", "
-            result = result & lstVulns.List(i)
+    Dim col As Long
+    col = 3
+    Do While wsK.Cells(2, col).Value <> ""
+        Dim chk As Object, cmb As Object
+        Set chk = Nothing: Set cmb = Nothing
+        On Error Resume Next
+        Set chk = frmVulns.Controls("chk_" & col)
+        Set cmb = frmVulns.Controls("cmb_" & col)
+        On Error GoTo 0
+        If Not chk Is Nothing Then
+            If chk.Value = True Then
+                Dim probNum As String
+                probNum = "2"
+                If Not cmb Is Nothing Then
+                    If cmb.ListIndex >= 0 Then probNum = CStr(cmb.ListIndex + 1)
+                End If
+                If result <> "" Then result = result & ", "
+                result = result & chk.Tag & " (" & probNum & ")"
+            End If
         End If
-    Next i
+        col = col + 1
+    Loop
     wsR.Cells(3, GRC_Macros.g_RARMCol).Value = result
     Unload Me
     GRC_Macros.KleurAlleRARMKolommen
@@ -1277,40 +1359,7 @@ Sub ImportAlles()
     Set conn = OpenAccess(fd.SelectedItems(1))
     If conn Is Nothing Then Application.ScreenUpdating = True: Exit Sub
 
-    ' --- 1. Processen ---
-    Set rs = CreateObject("ADODB.Recordset")
-    On Error Resume Next
-    rs.Open "SELECT * FROM [T - Processes in scope]", conn, 0, 1
-    If Err.Number <> 0 Then
-        MsgBox "Tabel 'T - Processes in scope' niet gevonden.", vbExclamation, "GRC Import"
-        conn.Close: Application.ScreenUpdating = True: Exit Sub
-    End If
-    On Error GoTo 0
-    Set ws = ThisWorkbook.Sheets("Processes")
-    ws.Range("B6:E105").ClearContents
-    ws.Range("F6:F105").ClearContents
-    ws.Range("H6:H105").ClearContents
-    ws.Range("J6:J105").ClearContents
-    ws.Range("K6:K105").ClearContents
-    ws.Range("L6:L105").ClearContents
-    destRow = 6
-    Do While Not rs.EOF And destRow <= 105
-        ws.Cells(destRow, 2) = FieldVal(rs, "naam", "procesnaam", "process naam", "name", "process name", "nom", "nom du processus", "processus", "titel", "title")
-        ws.Cells(destRow, 3) = FieldVal(rs, "omschrijving", "beschrijving", "description", "beschr", "omschr", "toelichting", "detail", "details")
-        ws.Cells(destRow, 4) = FieldVal(rs, "eigenaar", "proceseigenaar", "process eigenaar", "process owner", "verantwoordelijke", "owner", "propri" & Chr(233) & "taire", "responsible")
-        ws.Cells(destRow, 5) = FieldVal(rs, "dienst", "afdeling", "organisatie", "entiteit", "department", "service", "business unit", "entity")
-        ws.Cells(destRow, 6) = MapCls(FieldVal(rs, "integriteit", "integrity", "int" & Chr(233) & "grit" & Chr(233), "integr"))
-        ws.Cells(destRow, 8) = MapCls(FieldVal(rs, "beschikbaarheid", "availability", "disponibilit" & Chr(233), "beschikb", "availab"))
-        destRow = destRow + 1
-        rs.MoveNext
-    Loop
-    rs.Close
-    nProc = destRow - 6
-    VulGekoppeldeAssets conn, ws, 6, 105
-    VulGekoppeldeAfhankelijkeAssets conn, ws, 6, 105
-    ws.Rows("6:105").AutoFit
-
-    ' --- 2. Informatieassets ---
+    ' --- 1. Informatieassets ---
     Set rs = CreateObject("ADODB.Recordset")
     On Error Resume Next
     rs.Open "SELECT * FROM [T - Information Assets]", conn, 0, 1
@@ -1336,7 +1385,7 @@ Sub ImportAlles()
     rs.Close
     nAsset = destRow - 6
 
-    ' --- 3. Afhankelijke assets ---
+    ' --- 2. Afhankelijke assets ---
     Set rs = CreateObject("ADODB.Recordset")
     On Error Resume Next
     rs.Open "SELECT * FROM [T - Dependent assets]", conn, 0, 1
@@ -1381,7 +1430,47 @@ Sub ImportAlles()
     rs.Close
     nDep = destRow - 6
 
+    ' --- 3. Processen ---
+    Set rs = CreateObject("ADODB.Recordset")
+    On Error Resume Next
+    rs.Open "SELECT * FROM [T - Processes in scope]", conn, 0, 1
+    If Err.Number <> 0 Then
+        MsgBox "Tabel 'T - Processes in scope' niet gevonden.", vbExclamation, "GRC Import"
+        conn.Close: Application.ScreenUpdating = True: Exit Sub
+    End If
+    On Error GoTo 0
+    Set ws = ThisWorkbook.Sheets("Processes")
+    ws.Range("B6:E105").ClearContents
+    ws.Range("F6:F105").ClearContents
+    ws.Range("H6:H105").ClearContents
+    ws.Range("J6:J105").ClearContents
+    ws.Range("K6:K105").ClearContents
+    ws.Range("L6:L105").ClearContents
+    destRow = 6
+    Do While Not rs.EOF And destRow <= 105
+        ws.Cells(destRow, 2) = FieldVal(rs, "naam", "procesnaam", "process naam", "name", "process name", "nom", "nom du processus", "processus", "titel", "title")
+        ws.Cells(destRow, 3) = FieldVal(rs, "omschrijving", "beschrijving", "description", "beschr", "omschr", "toelichting", "detail", "details")
+        ws.Cells(destRow, 4) = FieldVal(rs, "eigenaar", "proceseigenaar", "process eigenaar", "process owner", "verantwoordelijke", "owner", "propri" & Chr(233) & "taire", "responsible")
+        ws.Cells(destRow, 5) = FieldVal(rs, "dienst", "afdeling", "organisatie", "entiteit", "department", "service", "business unit", "entity")
+        ws.Cells(destRow, 6) = MapCls(FieldVal(rs, "integriteit", "integrity", "int" & Chr(233) & "grit" & Chr(233), "integr"))
+        ws.Cells(destRow, 8) = MapCls(FieldVal(rs, "beschikbaarheid", "availability", "disponibilit" & Chr(233), "beschikb", "availab"))
+        destRow = destRow + 1
+        rs.MoveNext
+    Loop
+    rs.Close
+    nProc = destRow - 6
+    VulGekoppeldeAssets conn, ws, 6, 105
+    VulGekoppeldeAfhankelijkeAssets conn, ws, 6, 105
+    ws.Rows("6:105").AutoFit
+
+    ' Herlaad RARM-kolomkoppen
+    RefreshRARMKolommen
+
+    ' Kwetsbaarheden en controls matrix mee importeren
+    CoreImportKwetsbaarheden conn
+
     conn.Close
+    KleurAlleRARMKolommen
     Application.ScreenUpdating = True
     MsgBox nProc & " processen, " & nAsset & " informatieassets en " & nDep & _
            " afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
@@ -1485,14 +1574,35 @@ Sub ImportAfhankelijkeAssets()
     procWs.Range("L6:L105").ClearContents
     VulGekoppeldeAfhankelijkeAssets conn, procWs, 6, 105
 
+    ' Herlaad RARM-kolomkoppen
+    RefreshRARMKolommen
+
     conn.Close
     Application.ScreenUpdating = True
-
-    ' Herlaad RARM-kolommen zodat ze overeenkomen met de nieuwe DA-namen
-    RefreshRARMKolommen
     KleurAlleRARMKolommen
 
     MsgBox destRow - 6 & " afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
+End Sub
+
+' Importeer koppelingen kwetsbaarheden <-> afhankelijke assets (standalone knop)
+' Voer dit uit NA de import van kwetsbaarheden.
+Sub ImportLinksKwetsbaarheden()
+    Dim fd As FileDialog
+    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    fd.Title = "Selecteer de Access-database"
+    fd.Filters.Clear
+    fd.Filters.Add "Access-bestanden", "*.accdb; *.mdb"
+    If fd.Show = False Then Exit Sub
+    Application.ScreenUpdating = False
+    Dim conn As Object
+    Set conn = OpenAccess(fd.SelectedItems(1))
+    If conn Is Nothing Then Application.ScreenUpdating = True: Exit Sub
+    RefreshRARMKolommen
+    ImportRARMKwetsbaarheden conn
+    conn.Close
+    Application.ScreenUpdating = True
+    KleurAlleRARMKolommen
+    MsgBox "Links kwetsbaarheden / afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
 End Sub
 
 ' Opent het UserForm VulnPicker voor kwetsbaarheid-selectie in RARM-sheet
@@ -1520,6 +1630,10 @@ Private Function GetMarkedCtrlIDs(wsK As Worksheet, selVulns As String) As Objec
     Dim vName As String, vCol As Long, hdrVal As String, cv As String, cid As String
     For p = 0 To UBound(selParts)
         vName = Trim(selParts(p))
+        ' Strip probability suffix (format: "VulnName (N)")
+        Dim parenIdx As Integer
+        parenIdx = InStrRev(vName, " (")
+        If parenIdx > 0 Then vName = Left(vName, parenIdx - 1)
         If vName <> "" Then
             vCol = 0
             For kc = KWETS_COL_VSTART To KWETS_COL_VSTART + 300
@@ -1542,12 +1656,106 @@ Private Function GetMarkedCtrlIDs(wsK As Worksheet, selVulns As String) As Objec
     Set GetMarkedCtrlIDs = result
 End Function
 
+' Importeert kwetsbaarheden + probabiliteit per DA vanuit Access naar RARM rij 3.
+' Leest SQL van "QLT2 - Vulnerabilities for DA - assigned" via ADOX, verwijdert de WHERE
+' clausule (bevat formulierparameters) en voert de gecleande SQL rechtstreeks uit.
+Sub ImportRARMKwetsbaarheden(conn As Object)
+    Const RARM_ROW_DA   As Long = 2
+    Const RARM_ROW_VULN As Long = 3
+    Const RARM_COL_DA   As Long = 5
+
+    Dim wsR As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    On Error GoTo 0
+    If wsR Is Nothing Then Exit Sub
+
+    ' ── 1. Directe SQL op de onderliggende tabellen (geen Access-query nodig) ─────
+    ' Tabel LT - Vulnerabilities to Dependent Assets: DAID, VulnerabilityID, Probability
+    Dim qSQL As String
+    qSQL = "SELECT [T - Dependent assets].DAName, [T - Vulnerabilities].Vulnerability, " & _
+           "[LT - Vulnerabilities to Dependent Assets].Probability " & _
+           "FROM ([T - Dependent assets] " & _
+           "INNER JOIN [LT - Vulnerabilities to Dependent Assets] " & _
+           "ON [T - Dependent assets].ID = [LT - Vulnerabilities to Dependent Assets].DAID) " & _
+           "INNER JOIN [T - Vulnerabilities] " & _
+           "ON [T - Vulnerabilities].ID = [LT - Vulnerabilities to Dependent Assets].VulnerabilityID"
+
+    ' ── 2. Voer SQL uit en groepeer per DA-naam ──────────────────────────────────
+    ' qaMap: LCase(DA-naam) → vbTab-gescheiden "vulnNaam~prob" items
+    Dim qaMap As Object
+    Set qaMap = CreateObject("Scripting.Dictionary")
+    Dim rs As Object
+    Set rs = CreateObject("ADODB.Recordset")
+    On Error Resume Next
+    rs.Open qSQL, conn, 0, 1
+    If Err.Number <> 0 Then
+        MsgBox "Fout bij uitvoeren query: " & Err.Description, vbExclamation, "GRC Import"
+        Exit Sub
+    End If
+    On Error GoTo 0
+
+    Do While Not rs.EOF
+        Dim daNm As String
+        daNm = FieldVal(rs, "naam", "name", "da naam", "da name", "dependent asset", _
+                        "asset naam", "asset name", "asset", "da")
+        Dim vNm As String
+        vNm = FieldVal(rs, "vulnerability", "kwetsbaarheid", "vuln naam", "vuln name", "vuln")
+        Dim pStr As String
+        pStr = "2"
+        On Error Resume Next
+        If Not IsNull(rs.Fields("Probability").Value) Then pStr = Trim(CStr(rs.Fields("Probability").Value))
+        On Error GoTo 0
+        If daNm <> "" And vNm <> "" Then
+            Dim qKey As String
+            qKey = LCase(Trim(daNm))
+            Dim qEntry As String
+            qEntry = vNm & "~" & pStr
+            If qaMap.Exists(qKey) Then
+                qaMap(qKey) = qaMap(qKey) & vbTab & qEntry
+            Else
+                qaMap(qKey) = qEntry
+            End If
+        End If
+        rs.MoveNext
+    Loop
+    rs.Close
+
+    ' ── 3. Schrijf naar RARM rij 3 op basis van DA-naam in rij 2 (bovenste lijn) ─
+    Dim col As Long
+    col = RARM_COL_DA
+    Do While Trim(CStr(wsR.Cells(RARM_ROW_DA, col).Value)) <> ""
+        Dim rarmKey As String
+        rarmKey = LCase(Trim(CStr(wsR.Cells(RARM_ROW_DA, col).Value)))
+        Dim result As String
+        result = ""
+        If qaMap.Exists(rarmKey) Then
+            Dim pairs() As String
+            pairs = Split(CStr(qaMap(rarmKey)), vbTab)
+            Dim pi As Integer
+            For pi = 0 To UBound(pairs)
+                Dim pp() As String
+                pp = Split(pairs(pi), "~")
+                If UBound(pp) >= 0 And pp(0) <> "" Then
+                    If result <> "" Then result = result & ", "
+                    result = result & pp(0)
+                    If UBound(pp) >= 1 And pp(1) <> "" Then result = result & " (" & pp(1) & ")"
+                End If
+            Next pi
+        End If
+        wsR.Cells(RARM_ROW_VULN, col).Value = result
+        col = col + 1
+    Loop
+End Sub
+
 ' Herlaadt DA-kolomkoppen in RARM vanuit de Dependent Assets sheet.
 ' Leest col 2 (naam) en col 6 (overarching) van rijen 6-105.
 Sub RefreshRARMKolommen()
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
-    Const RARM_COL_DA   As Long = 4
+    Const RARM_ROW_DATA As Long = 4
+    Const RARM_COL_ID   As Long = 1
+    Const RARM_COL_DA   As Long = 5
     Const DA_COL_NAAM   As Long = 2
     Const DA_COL_OARCH  As Long = 6
     Dim wsR As Worksheet, wsD As Worksheet
@@ -1556,13 +1764,27 @@ Sub RefreshRARMKolommen()
     Set wsD = ThisWorkbook.Sheets("Dependent Assets")
     On Error GoTo 0
     If wsR Is Nothing Or wsD Is Nothing Then Exit Sub
-    ' Clear all existing DA header cells in row 2 (from col 4 to end of used range)
-    Dim lastCol As Long
+
+    ' Bepaal het huidige bereik van DA-kolommen en de laatste datarij
+    Dim lastCol As Long, rarmLastData As Long
     lastCol = wsR.Cells(RARM_ROW_DA, wsR.Columns.Count).End(xlToLeft).Column
+    rarmLastData = wsR.Cells(wsR.Rows.Count, RARM_COL_ID).End(xlUp).Row
+
+    ' Reset het volledige DA-zone: koppen (rij 2-3) + datacellen — zodat verwijderde
+    ' kolommen geen opmaakrestanten achterlaten
     If lastCol >= RARM_COL_DA Then
-        wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), wsR.Cells(RARM_ROW_DA, lastCol + 5)).ClearContents
-        wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), wsR.Cells(RARM_ROW_DA, lastCol + 5)).Interior.ColorIndex = xlNone
+        Dim hdrRng As Range, dataRng As Range
+        Set hdrRng  = wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), _
+                                wsR.Cells(RARM_ROW_VULN, lastCol + 5))
+        Set dataRng = wsR.Range(wsR.Cells(RARM_ROW_DATA, RARM_COL_DA), _
+                                wsR.Cells(rarmLastData, lastCol + 5))
+        hdrRng.ClearContents
+        hdrRng.Interior.ColorIndex  = xlNone
+        hdrRng.Borders.LineStyle    = xlNone
+        dataRng.Interior.ColorIndex = xlNone
+        dataRng.Borders.LineStyle   = xlNone
     End If
+
     Dim col As Long
     col = RARM_COL_DA
     Dim r As Long, daNaam As String, isOarch As Boolean
@@ -1578,10 +1800,12 @@ Sub RefreshRARMKolommen()
                 .VerticalAlignment = xlCenter
                 .WrapText = True
                 If isOarch Then
-                    .Interior.Color = RGB(180, 83, 9)   ' oranje = overarching
+                    .Interior.Color = RGB(180, 83, 9)
                 Else
-                    .Interior.Color = RGB(254, 249, 195) ' geel-licht = normaal
+                    .Interior.Color = RGB(254, 249, 195)
                 End If
+                .Borders.LineStyle = xlContinuous
+                .Borders.Color     = RGB(15, 43, 70)
             End With
             With wsR.Cells(RARM_ROW_VULN, col)
                 .Font.Italic = True: .Font.Size = 9
@@ -1590,8 +1814,10 @@ Sub RefreshRARMKolommen()
                 .HorizontalAlignment = xlCenter
                 .VerticalAlignment = xlCenter
                 .WrapText = True
+                .Borders.LineStyle = xlContinuous
+                .Borders.Color     = RGB(15, 43, 70)
             End With
-            If col >= RARM_COL_DA + 10 Then wsR.Columns(col).ColumnWidth = 22
+            wsR.Columns(col).ColumnWidth = 22
             col = col + 1
         End If
     Next r
@@ -1608,7 +1834,7 @@ End Sub
 ' Kleurt alle DA-kolommen in RARM door KleurRARMKolom aan te roepen per kolom.
 Sub KleurAlleRARMKolommen()
     Const RARM_ROW_DA As Long = 2
-    Const RARM_COL_DA As Long = 4
+    Const RARM_COL_DA As Long = 5
     Dim wsR As Worksheet
     On Error Resume Next
     Set wsR = ThisWorkbook.Sheets("RARM")
@@ -1622,6 +1848,131 @@ Sub KleurAlleRARMKolommen()
     Loop
 End Sub
 
+' Synchroniseert RARM DA-kolommen met de Dependent Assets-sheet.
+' Bewaart rij-3-waarden (kwetsbaarheden) en vinkjes voor DA's die nog bestaan.
+' Kolommen van weggevallen DA's worden verwijderd; nieuwe DA's krijgen een lege kolom.
+' Roep KleurAlleRARMKolommen aan na afloop voor correcte kleuring.
+Sub SyncRARMKolommen()
+    Const RARM_ROW_DA   As Long = 2
+    Const RARM_ROW_VULN As Long = 3
+    Const RARM_ROW_DATA As Long = 4
+    Const RARM_COL_ID   As Long = 1
+    Const RARM_COL_DA   As Long = 5
+    Const DA_COL_NAAM   As Long = 2
+    Const DA_COL_OARCH  As Long = 6
+
+    Dim wsR As Worksheet, wsD As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    Set wsD = ThisWorkbook.Sheets("Dependent Assets")
+    On Error GoTo 0
+    If wsR Is Nothing Or wsD Is Nothing Then Exit Sub
+
+    Dim rarmLast As Long
+    rarmLast = wsR.Cells(wsR.Rows.Count, RARM_COL_ID).End(xlUp).Row
+    Dim lastCol As Long
+    lastCol = wsR.Cells(RARM_ROW_DA, wsR.Columns.Count).End(xlToLeft).Column
+
+    ' ── 1. Snapshot: bewaar rij-3-waarde en vinkjes per DA-naam ─────────────────
+    Dim oldVuln As Object
+    Set oldVuln = CreateObject("Scripting.Dictionary")
+    Dim oldData As Object
+    Set oldData = CreateObject("Scripting.Dictionary")
+
+    Dim c As Long, dKey As String, dNm As String
+    For c = RARM_COL_DA To lastCol
+        dNm = Trim(CStr(wsR.Cells(RARM_ROW_DA, c).Value))
+        If dNm <> "" Then
+            dKey = LCase(dNm)
+            If Not oldVuln.Exists(dKey) Then
+                oldVuln.Add dKey, CStr(wsR.Cells(RARM_ROW_VULN, c).Value)
+                Dim rowDict As Object
+                Set rowDict = CreateObject("Scripting.Dictionary")
+                Dim r As Long
+                For r = RARM_ROW_DATA To rarmLast
+                    Dim cv As String
+                    cv = CStr(wsR.Cells(r, c).Value)
+                    If cv <> "" Then rowDict.Add r, cv
+                Next r
+                oldData.Add dKey, rowDict
+            End If
+        End If
+    Next c
+
+    ' ── 2. Wis DA-zone (koppen + data, incl. formattering) ──────────────────────
+    If lastCol >= RARM_COL_DA Then
+        Dim clearTo As Long
+        clearTo = lastCol + 5
+        With wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), wsR.Cells(RARM_ROW_VULN, clearTo))
+            .ClearContents
+            .Interior.ColorIndex = xlNone
+            .Borders.LineStyle   = xlNone
+        End With
+        With wsR.Range(wsR.Cells(RARM_ROW_DATA, RARM_COL_DA), wsR.Cells(rarmLast, clearTo))
+            .ClearContents
+            .Interior.ColorIndex = xlNone
+            .Borders.LineStyle   = xlNone
+        End With
+    End If
+
+    ' ── 3. Herbouw DA-kolommen in DA-sheet volgorde; herstel opgeslagen data ─────
+    Dim col As Long
+    col = RARM_COL_DA
+    Dim daR As Long, daNameRaw As String, isOarch As Boolean, dkLow As String
+    For daR = 6 To 105
+        daNameRaw = Trim(CStr(wsD.Cells(daR, DA_COL_NAAM).Value))
+        If daNameRaw <> "" Then
+            isOarch = (Trim(CStr(wsD.Cells(daR, DA_COL_OARCH).Value)) <> "")
+            dkLow = LCase(daNameRaw)
+
+            With wsR.Cells(RARM_ROW_DA, col)
+                .Value = daNameRaw
+                .Font.Bold = True: .Font.Size = 10
+                .Font.Color = RGB(15, 43, 70)
+                .HorizontalAlignment = xlCenter
+                .VerticalAlignment = xlCenter
+                .WrapText = True
+                .Interior.Color = IIf(isOarch, RGB(180, 83, 9), RGB(254, 249, 195))
+                .Borders.LineStyle = xlContinuous
+                .Borders.Color     = RGB(15, 43, 70)
+            End With
+
+            With wsR.Cells(RARM_ROW_VULN, col)
+                If oldVuln.Exists(dkLow) Then .Value = oldVuln(dkLow)
+                .Font.Italic = True: .Font.Size = 9
+                .Font.Color = RGB(100, 116, 139)
+                .Interior.Color = RGB(239, 246, 255)
+                .HorizontalAlignment = xlCenter
+                .VerticalAlignment = xlCenter
+                .WrapText = True
+                .Borders.LineStyle = xlContinuous
+                .Borders.Color     = RGB(15, 43, 70)
+            End With
+
+            If oldData.Exists(dkLow) Then
+                Dim rd As Object
+                Set rd = oldData(dkLow)
+                Dim rk As Variant
+                For Each rk In rd.Keys
+                    wsR.Cells(CLng(rk), col).Value = rd(rk)
+                Next rk
+            End If
+
+            wsR.Columns(col).ColumnWidth = 22
+            col = col + 1
+        End If
+    Next daR
+
+    ' ── 4. Titel-merge ───────────────────────────────────────────────────────────
+    Dim titleLast As Long
+    titleLast = col - 1
+    If titleLast < RARM_COL_DA + 9 Then titleLast = RARM_COL_DA + 9
+    On Error Resume Next
+    wsR.Cells(1, 1).MergeArea.UnMerge
+    On Error GoTo 0
+    wsR.Range(wsR.Cells(1, 1), wsR.Cells(1, titleLast)).Merge
+End Sub
+
 ' Kleurt één DA-kolom in RARM:
 '   - Volledige oranje (RGB 255,192,0) voor controls gelinkt aan eigen geselecteerde kwetsbaarheden.
 '   - Lichtgele spill (RGB 255,230,153) voor controls van overarching DA-kolommen,
@@ -1631,7 +1982,7 @@ Sub KleurRARMKolom(targetCol As Long)
     Const RARM_ROW_VULN    As Long = 3
     Const RARM_ROW_DATA    As Long = 4
     Const RARM_COL_ID      As Long = 1
-    Const RARM_COL_DA      As Long = 4
+    Const RARM_COL_DA      As Long = 5
     Const DA_COL_NAAM      As Long = 2
     Const DA_COL_OARCH     As Long = 6
 
@@ -1646,11 +1997,16 @@ Sub KleurRARMKolom(targetCol As Long)
     Dim rarmLast As Long
     rarmLast = wsR.Cells(wsR.Rows.Count, RARM_COL_ID).End(xlUp).Row
 
-    ' Reset naar wisselend grijs/wit
+    ' Reset naar wisselend grijs/wit met uniforme rand
+    Dim bClr As Long
+    bClr = RGB(203, 213, 225)   ' grey_border
     Dim r As Long
     For r = RARM_ROW_DATA To rarmLast
-        wsR.Cells(r, targetCol).Interior.Color = _
-            IIf((r - RARM_ROW_DATA) Mod 2 = 0, RGB(242, 242, 242), RGB(255, 255, 255))
+        With wsR.Cells(r, targetCol)
+            .Interior.Color = IIf((r - RARM_ROW_DATA) Mod 2 = 0, RGB(242, 242, 242), RGB(255, 255, 255))
+            .Borders.LineStyle = xlContinuous
+            .Borders.Color     = bClr
+        End With
     Next r
 
     ' Eigen kwetsbaarheden → volledige kleur
@@ -1824,50 +2180,26 @@ Sub ExporteerAlles()
 End Sub
 
 ' Refresh Kwetsbaarheden-matrix vanuit Access (kolommen=controls, rijen=vulns×CIA)
-Sub ImportKwetsbaarheden()
-    ' Layout:
-    '   Kolom A = Control ID (statisch), kolom B = Richtlijn (statisch)
-    '   Kolom C+ = 1 kolom per kwetsbaarheid (dynamisch)
-    '   Rij 2  = kwetsbaarheid-namen
-    '   Rij 3  = Vertrouwelijkheid (C) — ✔ als kwetsbaarheid C-impact heeft
-    '   Rij 4  = Integriteit (I)
-    '   Rij 5  = Beschikbaarheid (A)
-    '   Rij 6+ = 1 rij per control — ✔ in vuln-kolom als control remediëring biedt
-
+Private Sub CoreImportKwetsbaarheden(conn As Object)
     Const COL_ID      As Integer = 1
     Const COL_TITLE   As Integer = 2
-    Const COL_V_START As Integer = 3   ' eerste kwetsbaarheid-kolom
+    Const COL_V_START As Integer = 3
     Const ROW_TITLE   As Integer = 1
     Const ROW_VULN    As Integer = 2
     Const ROW_C       As Integer = 3
     Const ROW_I       As Integer = 4
     Const ROW_A       As Integer = 5
     Const ROW_DATA    As Integer = 6
-    Const COL_CF25    As Integer = 6   ' F = 2025 Requirement in CyFun Controls
-    Const COL_CF23    As Integer = 13  ' M = 2023 Requirement in CyFun Controls
-    Const ROW_CF_DATA As Integer = 4   ' eerste datarij in CyFun Controls
+    Const COL_CF25    As Integer = 6
+    Const COL_CF23    As Integer = 13
+    Const ROW_CF_DATA As Integer = 4
 
-    Dim fd As FileDialog
-    Dim dbPath As String
-    Dim conn As Object
     Dim ws As Worksheet, wsCC As Worksheet, wsAfw As Worksheet
     Dim rs As Object, rsCtrl As Object, rsLT As Object
     Dim rr As Long, v As Integer
     Dim ctrlRowMap As Object, refNrMap As Object
     Dim rev23to25 As Object, enkel23Set As Object, afwList As Object
     Dim lastRow As Long, lastCol As Long, nVuln As Integer, nMatched As Long
-
-    ' ── 0. Bestandkeuze ──────────────────────────────────────────────────────
-    Set fd = Application.FileDialog(msoFileDialogFilePicker)
-    fd.Title = "Selecteer de Access-database (kwetsbaarheden)"
-    fd.Filters.Clear
-    fd.Filters.Add "Access-bestanden", "*.accdb; *.mdb"
-    If fd.Show = False Then Exit Sub
-    dbPath = fd.SelectedItems(1)
-
-    Application.ScreenUpdating = False
-    Set conn = OpenAccess(dbPath)
-    If conn Is Nothing Then Application.ScreenUpdating = True: Exit Sub
 
     Set ws = ThisWorkbook.Sheets("Kwetsbaarheden")
 
@@ -2096,7 +2428,6 @@ Sub ImportKwetsbaarheden()
         rsLT.MoveNext
     Loop
     rsLT.Close
-    conn.Close
 
     ' ── 8. Afwijkingen-sheet bijwerken ────────────────────────────────────────
     On Error Resume Next
@@ -2124,9 +2455,25 @@ Sub ImportKwetsbaarheden()
         aRow = aRow + 1
     Next afwKey2
 
-    Application.ScreenUpdating = True
     MsgBox "Geladen: " & nVuln & " kwetsbaarheden, " & nMatched & " matches, " & _
            afwList.Count & " afwijkingen.", vbInformation, "GRC Import"
+End Sub
+
+' Importeer kwetsbaarheden standalone (knop op Kwetsbaarheden-sheet)
+Sub ImportKwetsbaarheden()
+    Dim fd As FileDialog
+    Set fd = Application.FileDialog(msoFileDialogFilePicker)
+    fd.Title = "Selecteer de Access-database (kwetsbaarheden)"
+    fd.Filters.Clear
+    fd.Filters.Add "Access-bestanden", "*.accdb; *.mdb"
+    If fd.Show = False Then Exit Sub
+    Application.ScreenUpdating = False
+    Dim conn As Object
+    Set conn = OpenAccess(fd.SelectedItems(1))
+    If conn Is Nothing Then Application.ScreenUpdating = True: Exit Sub
+    CoreImportKwetsbaarheden conn
+    conn.Close
+    Application.ScreenUpdating = True
 End Sub
 
 ' Normaliseert elke CyFun 2023 ID-string naar lowercase kort ID, ongeacht het formaat:
@@ -2218,7 +2565,7 @@ for letter in ["B", "C", "D"]:
     ws_lang.column_dimensions[letter].width = 72
 
 # Classificatiewaarden F=NL, G=FR, H=EN  — 5 niveaus
-CLS_START  = 250
+CLS_START   = 250
 ROLES_START = 258
 TYPES_START = 270
 
@@ -2705,7 +3052,7 @@ ws_dep.auto_filter.ref = f"A{HDR_DEP}:{get_column_letter(N_DEP)}{HDR_DEP}"
 def build_rarm(ws):
     """
     RARM — Risk Assessment & Remediation Matrix.
-    Kolommen: A=Control ID  B=Richtlijn  C=Assurance  D+=per Dependent Asset (dynamisch via macro)
+    Kolommen: A=Control ID  B=Richtlijn  C=Assurance  D=Sleutelmaatregel  E+=per Dependent Asset (dynamisch via macro)
     Rijen:    1=Titel  2=DA-namen  3=Kwetsbaarheden-selector  4+=CyFun 2025 controls
     """
     ROW_DA       = 2
@@ -2714,7 +3061,8 @@ def build_rarm(ws):
     COL_ID       = 1
     COL_TITLE    = 2
     COL_ASS      = 3
-    COL_DA_START = 4
+    COL_KM       = 4   # Sleutelmaatregel (key measure)
+    COL_DA_START = 5
     N_TEMPLATE   = 10
 
     CYFUN_TABS = ["GOVERN", "IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]
@@ -2726,6 +3074,7 @@ def build_rarm(ws):
     ws.column_dimensions["A"].width = 14
     ws.column_dimensions["B"].width = 60
     ws.column_dimensions["C"].width = 13
+    ws.column_dimensions["D"].width = 18   # Sleutelmaatregel
     for k in range(N_TEMPLATE):
         ws.column_dimensions[get_column_letter(COL_DA_START + k)].width = 22
 
@@ -2743,7 +3092,8 @@ def build_rarm(ws):
                 parts     = req_text.split(":", 1)
                 req_id    = parts[0].strip()
                 req_title = parts[1].strip() if len(parts) > 1 else req_text
-                controls.append((req_id, req_title, assurance))
+                is_km     = row[2] is not None and str(row[2]).strip() != ""
+                controls.append((req_id, req_title, assurance, is_km))
         src_wb.close()
 
     ws.merge_cells(f"A1:{LAST_COL}1")
@@ -2754,7 +3104,8 @@ def build_rarm(ws):
     ws.row_dimensions[1].height = 34
 
     ws.row_dimensions[2].height = 36
-    for col_idx, label in [(COL_ID, "Control ID"), (COL_TITLE, "Richtlijn"), (COL_ASS, "Assurance")]:
+    for col_idx, label in [(COL_ID, "Control ID"), (COL_TITLE, "Richtlijn"),
+                           (COL_ASS, "Assurance"), (COL_KM, "Sleutelmaatregel")]:
         c = ws.cell(row=ROW_DA, column=col_idx, value=label)
         c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
         c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
@@ -2764,7 +3115,7 @@ def build_rarm(ws):
         c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
 
     ws.row_dimensions[3].height = 28
-    for col_idx in [COL_ID, COL_TITLE, COL_ASS]:
+    for col_idx in [COL_ID, COL_TITLE, COL_ASS, COL_KM]:
         c = ws.cell(row=ROW_VULN, column=col_idx)
         c.fill = fill("grey_light"); c.border = border_all("grey_border")
     for k in range(N_TEMPLATE):
@@ -2778,9 +3129,9 @@ def build_rarm(ws):
         b = cell.border
         cell.border = Border(left=thick, right=b.right, top=b.top, bottom=b.bottom)
 
-    ws.freeze_panes = "D4"
+    ws.freeze_panes = "E4"
 
-    for i, (req_id, req_title, assurance) in enumerate(controls):
+    for i, (req_id, req_title, assurance, is_km) in enumerate(controls):
         row_idx = ROW_DATA + i
         bg_key, fg_key = ASS_STYLE.get(assurance, ("white", "text"))
         row_bg = "grey_light" if i % 2 == 0 else "white"
@@ -2796,6 +3147,13 @@ def build_rarm(ws):
 
         c = ws.cell(row=row_idx, column=COL_ASS, value=assurance)
         c.fill = fill(bg_key); c.font = font(9, bold=True, color=fg_key)
+        c.alignment = align("center", "center"); c.border = border_all("grey_border")
+
+        # Sleutelmaatregel — ✔ indien key measure in CyFun bron, anders leeg; togglebaar via dubbelklik
+        c = ws.cell(row=row_idx, column=COL_KM)
+        c.fill = fill(row_bg)
+        c.value = "✔" if is_km else ""
+        c.font = font(10, bold=True, color="green")
         c.alignment = align("center", "center"); c.border = border_all("grey_border")
 
         for k in range(N_TEMPLATE):
@@ -2884,10 +3242,10 @@ def ie_action_block(ws, row, btn_key, desc_key, btn_color="blue_mid"):
 section_header(ws_ie, 5, "ie_section_import", 4, col_start=2)
 cur = 6
 cur = ie_action_block(ws_ie, cur, "ie_import_all_btn", "ie_import_all_desc")
+cur = ie_action_block(ws_ie, cur, "ie_import_links_btn", "ie_import_links_desc", btn_color="orange")
 
 section_header(ws_ie, cur, "ie_section_export", 4, col_start=2)
 cur += 1
-cur = ie_action_block(ws_ie, cur, "ie_export_btn", "ie_export_desc", btn_color="green")
 
 section_header(ws_ie, cur, "ie_section_info", 4, col_start=2)
 cur += 1
@@ -3647,39 +4005,7 @@ try:
         btn.OnAction = macro
 
     add_button(ws_ie_com, 10, 130, 200, 44, "▶  Importeer Alles", "GRC_Macros.ImportAlles")
-    # Export knop (groen)
-    btn_exp = ws_ie_com.Shapes.AddShape(1, 10, 270, 160, 34)
-    btn_exp.Fill.ForeColor.RGB = int("15803D", 16)
-    btn_exp.Line.Visible = False
-    btn_exp.TextFrame.Characters().Text = "▶  Exporteer alle gegevens"
-    btn_exp.TextFrame.Characters().Font.Bold = True
-    btn_exp.TextFrame.Characters().Font.Size = 11
-    btn_exp.TextFrame.Characters().Font.Color = int("FFFFFF", 16)
-    btn_exp.TextFrame.HorizontalAlignment = -4108
-    btn_exp.TextFrame.VerticalAlignment   = -4108
-    btn_exp.OnAction = "GRC_Macros.ExporteerAlles"
-    # Diagnostiek knop (grijs)
-    btn_diag = ws_ie_com.Shapes.AddShape(1, 10, 365, 160, 28)
-    btn_diag.Fill.ForeColor.RGB = int("475569", 16)
-    btn_diag.Line.Visible = False
-    btn_diag.TextFrame.Characters().Text = "Toon veldnamen database"
-    btn_diag.TextFrame.Characters().Font.Bold = False
-    btn_diag.TextFrame.Characters().Font.Size = 10
-    btn_diag.TextFrame.Characters().Font.Color = int("FFFFFF", 16)
-    btn_diag.TextFrame.HorizontalAlignment = -4108
-    btn_diag.TextFrame.VerticalAlignment   = -4108
-    btn_diag.OnAction = "GRC_Macros.VeldenTonen"
-    # Kwetsbaarheden importeer-knop (oranje)
-    btn_kwets = ws_ie_com.Shapes.AddShape(1, 10, 410, 200, 34)
-    btn_kwets.Fill.ForeColor.RGB = int("B45309", 16)
-    btn_kwets.Line.Visible = False
-    btn_kwets.TextFrame.Characters().Text = "▶  Importeer Kwetsbaarheden"
-    btn_kwets.TextFrame.Characters().Font.Bold = True
-    btn_kwets.TextFrame.Characters().Font.Size = 11
-    btn_kwets.TextFrame.Characters().Font.Color = int("FFFFFF", 16)
-    btn_kwets.TextFrame.HorizontalAlignment = -4108
-    btn_kwets.TextFrame.VerticalAlignment   = -4108
-    btn_kwets.OnAction = "GRC_Macros.ImportKwetsbaarheden"
+    add_button(ws_ie_com, 10, 218, 200, 44, "▶  Importeer Links DA/Kwetsbaarheden", "GRC_Macros.ImportLinksKwetsbaarheden")
 
     # Maak UserForm "AssetPicker" aan
     uf = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm
@@ -3741,36 +4067,46 @@ try:
     kwets_mod = wb_com.VBProject.VBComponents(kwets_code_name)
     kwets_mod.CodeModule.AddFromString(KWETS_SHEET_CODE)
 
-    # Maak UserForm "VulnPicker" aan (kwetsbaarheidselectie in RARM)
+    # Maak UserForm "VulnPicker" aan (kwetsbaarheidselectie + probabiliteit per vuln)
     vp = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm
     vp.Name = "VulnPicker"
     vp.Properties("Caption").Value = "Kwetsbaarheden selecteren"
-    vp.Properties("Width").Value  = 380
-    vp.Properties("Height").Value = 400
+    vp.Properties("Width").Value  = 458   # +28 pt (≈1 cm) rechts
+    vp.Properties("Height").Value = 514   # +28 pt (≈1 cm) onder + 16 pt rand onder knoppen
     vp_des = vp.Designer
-    # Label
+    # Titel-label
     lbl_vp = vp_des.Controls.Add("Forms.Label.1")
     lbl_vp.Name = "lblTitel"; lbl_vp.Caption = "Kwetsbaarheden"
-    lbl_vp.Left = 8; lbl_vp.Top = 8; lbl_vp.Width = 340; lbl_vp.Height = 20
+    lbl_vp.Left = 8; lbl_vp.Top = 8; lbl_vp.Width = 426; lbl_vp.Height = 20
     lbl_vp.Font.Bold = True
-    # ListBox
-    lst_vp = vp_des.Controls.Add("Forms.ListBox.1")
-    lst_vp.Name = "lstVulns"
-    lst_vp.Left = 8; lst_vp.Top = 34; lst_vp.Width = 340; lst_vp.Height = 280
-    lst_vp.MultiSelect = 1   # fmMultiSelectMulti
-    lst_vp.ListStyle  = 1   # fmListStyleOption (checkboxen)
-    # OK-knop
-    btn_vp_ok = vp_des.Controls.Add("Forms.CommandButton.1")
-    btn_vp_ok.Name = "btnOK"; btn_vp_ok.Caption = "OK"
-    btn_vp_ok.Left = 8; btn_vp_ok.Top = 326; btn_vp_ok.Width = 80; btn_vp_ok.Height = 28
-    btn_vp_ok.BackColor  = int("70AD47", 16)
-    btn_vp_ok.ForeColor  = int("FFFFFF", 16)
-    # Annuleer-knop
+    # Kolomkopjes
+    lbl_vuln_hdr = vp_des.Controls.Add("Forms.Label.1")
+    lbl_vuln_hdr.Name = "lblVulnHdr"; lbl_vuln_hdr.Caption = "Kwetsbaarheid"
+    lbl_vuln_hdr.Left = 8; lbl_vuln_hdr.Top = 30; lbl_vuln_hdr.Width = 216; lbl_vuln_hdr.Height = 14
+    lbl_vuln_hdr.Font.Italic = True
+    lbl_prob_hdr = vp_des.Controls.Add("Forms.Label.1")
+    lbl_prob_hdr.Name = "lblProbHdr"; lbl_prob_hdr.Caption = "Kans"
+    lbl_prob_hdr.Left = 228; lbl_prob_hdr.Top = 30; lbl_prob_hdr.Width = 198; lbl_prob_hdr.Height = 14
+    lbl_prob_hdr.Font.Italic = True
+    # Scrollable Frame voor CheckBox + ComboBox rijen (inhoud wordt dynamisch gevuld in VBA)
+    frm_vp = vp_des.Controls.Add("Forms.Frame.1")
+    frm_vp.Name = "frmVulns"
+    frm_vp.Caption = ""
+    frm_vp.Left = 8; frm_vp.Top = 46; frm_vp.Width = 426; frm_vp.Height = 388
+    frm_vp.ScrollBars = 2          # fmScrollBarsVertical
+    frm_vp.KeepScrollBarsVisible = 2  # alleen verticaal tonen wanneer nodig
+    # Annuleer-knop (links)
     btn_vp_ann = vp_des.Controls.Add("Forms.CommandButton.1")
     btn_vp_ann.Name = "btnAnnuleer"; btn_vp_ann.Caption = "Annuleer"
-    btn_vp_ann.Left = 268; btn_vp_ann.Top = 326; btn_vp_ann.Width = 80; btn_vp_ann.Height = 28
-    btn_vp_ann.BackColor = int("FF0000", 16)
+    btn_vp_ann.Left = 8; btn_vp_ann.Top = 446; btn_vp_ann.Width = 120; btn_vp_ann.Height = 30
+    btn_vp_ann.BackColor = int("C0504D", 16)
     btn_vp_ann.ForeColor = int("FFFFFF", 16)
+    # OK-knop (rechts)
+    btn_vp_ok = vp_des.Controls.Add("Forms.CommandButton.1")
+    btn_vp_ok.Name = "btnOK"; btn_vp_ok.Caption = "OK"
+    btn_vp_ok.Left = 322; btn_vp_ok.Top = 446; btn_vp_ok.Width = 120; btn_vp_ok.Height = 30
+    btn_vp_ok.BackColor  = int("70AD47", 16)
+    btn_vp_ok.ForeColor  = int("FFFFFF", 16)
     vp.CodeModule.AddFromString(VULNPICKER_CODE)
 
     # Voeg SelectionChange toe aan RARM sheet module

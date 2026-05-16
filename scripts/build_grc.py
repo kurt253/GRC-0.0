@@ -350,9 +350,41 @@ TRANSLATIONS = [
         "Importer tout",
         "Import All"),
     ("ie_import_all_desc",
-        "Selecteer de Access-database en importeer processen, informatieassets én afhankelijke assets in één stap. Koppelingen worden automatisch mee ingeladen.",
-        "Sélectionnez la base de données Access et importez processus, actifs informationnels et actifs dépendants en une seule étape. Les liens sont chargés automatiquement.",
-        "Select the Access database and import processes, information assets and dependent assets in one step. Links are loaded automatically."),
+        "Importeert informatieassets, afhankelijke assets, processen én kwetsbaarheden-matrix in één stap.",
+        "Importe actifs informationnels, actifs dépendants, processus et matrice des vulnérabilités en une seule étape.",
+        "Imports information assets, dependent assets, processes and vulnerability matrix in one step."),
+    ("ie_import_ia_btn",
+        "Importeer Informatieassets",
+        "Importer actifs informationnels",
+        "Import Information Assets"),
+    ("ie_import_ia_desc",
+        "Leest de tabel 'T - Information Assets' uit de Access-database en vult de tab Informatieassets.",
+        "Lit la table 'T - Information Assets' depuis la base Access et remplit l'onglet Actifs informationnels.",
+        "Reads the 'T - Information Assets' table from the Access database and fills the Information Assets tab."),
+    ("ie_import_da_btn",
+        "Importeer Afhankelijke Assets",
+        "Importer actifs dépendants",
+        "Import Dependent Assets"),
+    ("ie_import_da_desc",
+        "Leest de tabel 'T - Dependent assets' en vult de tab Afhankelijke Assets inclusief CIA-objectives.",
+        "Lit la table 'T - Dependent assets' et remplit l'onglet Actifs dépendants avec les objectifs CIA.",
+        "Reads the 'T - Dependent assets' table and fills the Dependent Assets tab including CIA objectives."),
+    ("ie_import_proc_btn",
+        "Importeer Processen",
+        "Importer processus",
+        "Import Processes"),
+    ("ie_import_proc_desc",
+        "Leest 'T - Processes in scope' en vult de tab Processen inclusief koppelingen aan assets.",
+        "Lit 'T - Processes in scope' et remplit l'onglet Processus avec les liens aux actifs.",
+        "Reads 'T - Processes in scope' and fills the Processes tab including asset links."),
+    ("ie_import_kwets_btn",
+        "Importeer Kwetsbaarheden",
+        "Importer vulnérabilités",
+        "Import Vulnerabilities"),
+    ("ie_import_kwets_desc",
+        "Laadt de kwetsbaarheden en hun koppeling aan CyFun-controls. Vereist dat de tab Kwetsbaarheden al aangemaakt is.",
+        "Charge les vulnérabilités et leur lien aux contrôles CyFun. Nécessite que l'onglet Vulnérabilités soit déjà créé.",
+        "Loads vulnerabilities and their link to CyFun controls. Requires the Vulnerabilities tab to already exist."),
     ("ie_import_links_btn",
         "Importeer Links DA / Kwetsbaarheden",
         "Importer liens actifs dépendants / vulnérabilités",
@@ -464,6 +496,8 @@ Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean
         Target.Value = ""
     Else
         Target.Value = ChrW(10004)
+        Target.HorizontalAlignment = xlCenter
+        Target.VerticalAlignment = xlCenter
     End If
 End Sub
 '''
@@ -639,6 +673,8 @@ Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean
         Target.Value = ""
     Else
         Target.Value = ChrW(10004)
+        Target.HorizontalAlignment = xlCenter
+        Target.VerticalAlignment = xlCenter
     End If
 End Sub
 
@@ -818,6 +854,8 @@ Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean
         Target.Value = ""
     Else
         Target.Value = ChrW(10004)
+        Target.HorizontalAlignment = xlCenter
+        Target.VerticalAlignment = xlCenter
     End If
 End Sub
 
@@ -1599,10 +1637,159 @@ Sub ImportLinksKwetsbaarheden()
     If conn Is Nothing Then Application.ScreenUpdating = True: Exit Sub
     RefreshRARMKolommen
     ImportRARMKwetsbaarheden conn
+    ImportGeselecteerdeControls conn
     conn.Close
     Application.ScreenUpdating = True
     KleurAlleRARMKolommen
-    MsgBox "Links kwetsbaarheden / afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
+    MsgBox "Links kwetsbaarheden / controls per afhankelijke asset ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
+End Sub
+
+' Importeert geselecteerde controls per DA vanuit LT - Selected controls to DA
+' en schrijft ChrW(10004) in de overeenkomstige RARM-datacellen.
+' Vertaalketen: ControlReference -> T-CyFunEssentiel.RefNr -> 2023-ID
+'              -> CyFun Controls sheet -> 2025-ID -> rijnummer in RARM
+Sub ImportGeselecteerdeControls(conn As Object)
+    Const RARM_ROW_DA   As Long = 2
+    Const RARM_ROW_DATA As Long = 4
+    Const RARM_COL_ID   As Long = 1
+    Const RARM_COL_DA   As Long = 5
+    Const COL_CF25      As Integer = 6
+    Const COL_CF23      As Integer = 13
+    Const ROW_CF_DATA   As Integer = 4
+
+    Dim wsR As Worksheet, wsCC As Worksheet
+    On Error Resume Next
+    Set wsR = ThisWorkbook.Sheets("RARM")
+    Set wsCC = ThisWorkbook.Sheets("CyFun Controls")
+    On Error GoTo 0
+    If wsR Is Nothing Then Exit Sub
+
+    Dim rarmLast As Long
+    rarmLast = wsR.Cells(wsR.Rows.Count, RARM_COL_ID).End(xlUp).Row
+    Dim lastCol As Long
+    lastCol = wsR.Cells(RARM_ROW_DA, wsR.Columns.Count).End(xlToLeft).Column
+
+    ' ── 1. ctrlRowMap: LCase(2025-ID) → rijnummer in RARM ───────────────────────
+    Dim ctrlRowMap As Object
+    Set ctrlRowMap = CreateObject("Scripting.Dictionary")
+    Dim rr As Long
+    For rr = RARM_ROW_DATA To rarmLast
+        Dim ck As String
+        ck = LCase(Trim(CStr(wsR.Cells(rr, RARM_COL_ID).Value)))
+        If ck <> "" And Not ctrlRowMap.Exists(ck) Then ctrlRowMap.Add ck, rr
+    Next rr
+
+    ' ── 2. refNrMap: RefNr (Long) → CyFun 2023 ID-string ───────────────────────
+    Dim refNrMap As Object
+    Set refNrMap = CreateObject("Scripting.Dictionary")
+    Dim rsCtrl As Object
+    Set rsCtrl = CreateObject("ADODB.Recordset")
+    rsCtrl.Open "SELECT RefNr, Requirement FROM [T - CyFunEssentiel]", conn
+    Do While Not rsCtrl.EOF
+        Dim refNr As Long
+        refNr = CLng(rsCtrl.Fields("RefNr").Value)
+        If Not refNrMap.Exists(refNr) Then
+            refNrMap.Add refNr, CStr(rsCtrl.Fields("Requirement").Value)
+        End If
+        rsCtrl.MoveNext
+    Loop
+    rsCtrl.Close
+
+    ' ── 3. rev23to25: LCase(2023-ID) → LCase(2025-ID) via CyFun Controls sheet ──
+    Dim rev23to25 As Object
+    Set rev23to25 = CreateObject("Scripting.Dictionary")
+    If Not wsCC Is Nothing Then
+        Dim ccLast As Long
+        ccLast = Application.Max( _
+            wsCC.Cells(wsCC.Rows.Count, COL_CF25).End(xlUp).Row, _
+            wsCC.Cells(wsCC.Rows.Count, COL_CF23).End(xlUp).Row)
+        Dim rCC As Long
+        For rCC = ROW_CF_DATA To ccLast
+            Dim r25t As String, r23t As String
+            r25t = Trim(CStr(wsCC.Cells(rCC, COL_CF25).Value))
+            r23t = Trim(CStr(wsCC.Cells(rCC, COL_CF23).Value))
+            If r25t <> "" And r23t <> "" Then
+                Dim p25 As Integer, p23 As Integer
+                p25 = InStr(r25t, ":"): p23 = InStr(r23t, ":")
+                Dim i25 As String, i23 As String
+                i25 = LCase(Trim(Replace(IIf(p25 > 0, Left(r25t, p25 - 1), r25t), Chr(9), "")))
+                i23 = NormId23(r23t)
+                If i23 <> "" And i25 <> "" And Not rev23to25.Exists(i23) Then
+                    rev23to25.Add i23, i25
+                End If
+            End If
+        Next rCC
+    End If
+
+    ' ── 4. daIdColMap: DAID (Long) → RARM-kolom ─────────────────────────────────
+    ' Koppel via naam: T - Dependent assets.DAName ↔ RARM rij 2 (LCase)
+    Dim daNameIdMap As Object
+    Set daNameIdMap = CreateObject("Scripting.Dictionary")
+    Dim rsDA As Object
+    Set rsDA = CreateObject("ADODB.Recordset")
+    rsDA.Open "SELECT ID, DAName FROM [T - Dependent assets]", conn
+    Do While Not rsDA.EOF
+        Dim daId As Long
+        daId = CLng(rsDA.Fields("ID").Value)
+        Dim daNm As String
+        daNm = LCase(Trim(CStr(rsDA.Fields("DAName").Value)))
+        If daNm <> "" And Not daNameIdMap.Exists(daNm) Then
+            daNameIdMap.Add daNm, daId
+        End If
+        rsDA.MoveNext
+    Loop
+    rsDA.Close
+
+    Dim daIdColMap As Object
+    Set daIdColMap = CreateObject("Scripting.Dictionary")
+    Dim c As Long
+    For c = RARM_COL_DA To lastCol
+        Dim rarmDaNm As String
+        rarmDaNm = LCase(Trim(CStr(wsR.Cells(RARM_ROW_DA, c).Value)))
+        If rarmDaNm <> "" And daNameIdMap.Exists(rarmDaNm) Then
+            Dim daIdForCol As Long
+            daIdForCol = CLng(daNameIdMap(rarmDaNm))
+            If Not daIdColMap.Exists(daIdForCol) Then daIdColMap.Add daIdForCol, c
+        End If
+    Next c
+
+    ' ── 5. Wis bestaande vinkjes in DA-kolommen ──────────────────────────────────
+    If lastCol >= RARM_COL_DA And rarmLast >= RARM_ROW_DATA Then
+        wsR.Range(wsR.Cells(RARM_ROW_DATA, RARM_COL_DA), _
+                  wsR.Cells(rarmLast, lastCol)).ClearContents
+    End If
+
+    ' ── 6. Lees LT - Selected controls to DA en schrijf vinkjes in RARM ─────────
+    Dim nMatched As Long
+    nMatched = 0
+    Dim rsLT As Object
+    Set rsLT = CreateObject("ADODB.Recordset")
+    rsLT.Open "SELECT DAID, ControlReference FROM [LT - Selected controls to DA]", conn
+    Do While Not rsLT.EOF
+        Dim ltDaId As Long, ctrlRef As Long
+        ltDaId  = CLng(rsLT.Fields("DAID").Value)
+        ctrlRef = CLng(rsLT.Fields("ControlReference").Value)
+        If daIdColMap.Exists(ltDaId) And refNrMap.Exists(ctrlRef) Then
+            Dim id23v As String
+            id23v = NormId23(CStr(refNrMap.Item(ctrlRef)))
+            Dim id25v As String
+            id25v = IIf(rev23to25.Exists(id23v), CStr(rev23to25.Item(id23v)), id23v)
+            If ctrlRowMap.Exists(id25v) Then
+                Dim ctrlRow As Long
+                ctrlRow = CLng(ctrlRowMap.Item(id25v))
+                Dim targetCol As Long
+                targetCol = CLng(daIdColMap(ltDaId))
+                With wsR.Cells(ctrlRow, targetCol)
+                    .Value = ChrW(10004)
+                    .HorizontalAlignment = xlCenter
+                    .VerticalAlignment = xlCenter
+                End With
+                nMatched = nMatched + 1
+            End If
+        End If
+        rsLT.MoveNext
+    Loop
+    rsLT.Close
 End Sub
 
 ' Opent het UserForm VulnPicker voor kwetsbaarheid-selectie in RARM-sheet
@@ -1954,7 +2141,11 @@ Sub SyncRARMKolommen()
                 Set rd = oldData(dkLow)
                 Dim rk As Variant
                 For Each rk In rd.Keys
-                    wsR.Cells(CLng(rk), col).Value = rd(rk)
+                    With wsR.Cells(CLng(rk), col)
+                        .Value = rd(rk)
+                        .HorizontalAlignment = xlCenter
+                        .VerticalAlignment = xlCenter
+                    End With
                 Next rk
             End If
 
@@ -2401,6 +2592,7 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
                             .Value = ChrW(10004)
                             .Interior.Color = RGB(198, 239, 206)
                             .HorizontalAlignment = xlCenter
+                            .VerticalAlignment = xlCenter
                             .Font.Size = 10
                         End With
                     Else
@@ -3159,6 +3351,7 @@ def build_rarm(ws):
         for k in range(N_TEMPLATE):
             c = ws.cell(row=row_idx, column=COL_DA_START + k)
             c.fill = fill(row_bg); c.border = border_all("grey_border")
+            c.alignment = align("center", "center")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3241,7 +3434,11 @@ def ie_action_block(ws, row, btn_key, desc_key, btn_color="blue_mid"):
 
 section_header(ws_ie, 5, "ie_section_import", 4, col_start=2)
 cur = 6
-cur = ie_action_block(ws_ie, cur, "ie_import_all_btn", "ie_import_all_desc")
+cur = ie_action_block(ws_ie, cur, "ie_import_all_btn",   "ie_import_all_desc")
+cur = ie_action_block(ws_ie, cur, "ie_import_ia_btn",    "ie_import_ia_desc")
+cur = ie_action_block(ws_ie, cur, "ie_import_da_btn",    "ie_import_da_desc")
+cur = ie_action_block(ws_ie, cur, "ie_import_proc_btn",  "ie_import_proc_desc")
+cur = ie_action_block(ws_ie, cur, "ie_import_kwets_btn", "ie_import_kwets_desc")
 cur = ie_action_block(ws_ie, cur, "ie_import_links_btn", "ie_import_links_desc", btn_color="orange")
 
 section_header(ws_ie, cur, "ie_section_export", 4, col_start=2)
@@ -4004,8 +4201,12 @@ try:
         btn.TextFrame.VerticalAlignment = -4108     # xlVAlignCenter
         btn.OnAction = macro
 
-    add_button(ws_ie_com, 10, 130, 200, 44, "▶  Importeer Alles", "GRC_Macros.ImportAlles")
-    add_button(ws_ie_com, 10, 218, 200, 44, "▶  Importeer Links DA/Kwetsbaarheden", "GRC_Macros.ImportLinksKwetsbaarheden")
+    add_button(ws_ie_com, 10, 130, 200, 44, "▶  Importeer Alles",                    "GRC_Macros.ImportAlles")
+    add_button(ws_ie_com, 10, 218, 200, 44, "▶  Importeer Informatieassets",          "GRC_Macros.ImportInformatieassets")
+    add_button(ws_ie_com, 10, 306, 200, 44, "▶  Importeer Afhankelijke Assets",       "GRC_Macros.ImportAfhankelijkeAssets")
+    add_button(ws_ie_com, 10, 394, 200, 44, "▶  Importeer Processen",                 "GRC_Macros.ImportProcessen")
+    add_button(ws_ie_com, 10, 482, 200, 44, "▶  Importeer Kwetsbaarheden",            "GRC_Macros.ImportKwetsbaarheden")
+    add_button(ws_ie_com, 10, 570, 200, 44, "▶  Importeer Links DA/Kwetsbaarheden",   "GRC_Macros.ImportLinksKwetsbaarheden")
 
     # Maak UserForm "AssetPicker" aan
     uf = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm

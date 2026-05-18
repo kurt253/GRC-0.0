@@ -806,7 +806,14 @@ Private Sub UserForm_Initialize()
         If assetNaam <> "" Then
             lstAssets.AddItem assetNaam
             Dim idx As Long: idx = lstAssets.ListCount - 1
-            If InStr(huidigStr, LCase(assetNaam)) > 0 Then lstAssets.Selected(idx) = True
+            Dim lines() As String
+            lines = Split(huidigStr, Chr(10))
+            Dim li As Long, isSelected As Boolean
+            isSelected = False
+            For li = 0 To UBound(lines)
+                If Trim(lines(li)) = LCase(Trim(assetNaam)) Then isSelected = True: Exit For
+            Next li
+            If isSelected Then lstAssets.Selected(idx) = True
         End If
     Next r
 End Sub
@@ -1773,7 +1780,11 @@ Sub ImportGeselecteerdeControls(conn As Object)
             Dim id23v As String
             id23v = NormId23(CStr(refNrMap.Item(ctrlRef)))
             Dim id25v As String
-            id25v = IIf(rev23to25.Exists(id23v), CStr(rev23to25.Item(id23v)), id23v)
+            If rev23to25.Exists(id23v) Then
+                id25v = CStr(rev23to25.Item(id23v))
+            Else
+                id25v = id23v
+            End If
             If ctrlRowMap.Exists(id25v) Then
                 Dim ctrlRow As Long
                 ctrlRow = CLng(ctrlRowMap.Item(id25v))
@@ -2370,7 +2381,9 @@ Sub ExporteerAlles()
     MsgBox "Export opgeslagen:" & vbCrLf & exportPath, vbInformation, "GRC Export"
 End Sub
 
-' Refresh Kwetsbaarheden-matrix vanuit Access (kolommen=controls, rijen=vulns×CIA)
+' Refresh Kwetsbaarheden-matrix vanuit Access.
+' FASE 1: kwetsbaarheid-namen + CIA-impact bijwerken op bestaande kolompositie.
+' FASE 2: voor elke kwetsbaarheid-kolom alle remediërende controls opzoeken en markeren.
 Private Sub CoreImportKwetsbaarheden(conn As Object)
     Const COL_ID      As Integer = 1
     Const COL_TITLE   As Integer = 2
@@ -2390,7 +2403,7 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
     Dim rr As Long, v As Integer
     Dim ctrlRowMap As Object, refNrMap As Object
     Dim rev23to25 As Object, enkel23Set As Object, afwList As Object
-    Dim lastRow As Long, lastCol As Long, nVuln As Integer, nMatched As Long
+    Dim lastRow As Long, nVuln As Integer, nMatched As Long
 
     Set ws = ThisWorkbook.Sheets("Kwetsbaarheden")
 
@@ -2403,19 +2416,14 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
         If Not ctrlRowMap.Exists(ck) Then ctrlRowMap.Add ck, rr
         rr = rr + 1
     Loop
-
-    ' ── 2. Wis alle kolommen C+ (ook lege maar opgemaakte invoerkolommen) ───────
-    Dim usedEndCol As Long
-    usedEndCol = ws.UsedRange.Column + ws.UsedRange.Columns.Count - 1
-    If usedEndCol >= COL_V_START Then
-        On Error Resume Next
-        ws.Cells(ROW_TITLE, 1).MergeArea.UnMerge
-        On Error GoTo 0
-        ws.Range(ws.Cells(1, COL_V_START), ws.Cells(1, usedEndCol)).EntireColumn.Delete
+    If ctrlRowMap.Count = 0 Then
+        MsgBox "Kwetsbaarheden-sheet bevat geen controls (rij 6+ van kolom A is leeg)." & vbCrLf & _
+               "Herbouw het bestand via build_grc.py en probeer opnieuw.", vbExclamation, "GRC Import"
+        Exit Sub
     End If
     lastRow = ws.Cells(ws.Rows.Count, COL_ID).End(xlUp).Row
 
-    ' ── 3. 2023→2025 reverse mapping + "Enkel 2023"-set via CyFun Controls-sheet ──
+    ' ── 2. 2023→2025 reverse mapping + "Enkel 2023"-set via CyFun Controls-sheet ──
     Set rev23to25  = CreateObject("Scripting.Dictionary")
     Set enkel23Set = CreateObject("Scripting.Dictionary")
     On Error Resume Next
@@ -2432,7 +2440,6 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
             r25t = Trim(CStr(wsCC.Cells(rCC, COL_CF25).Value))
             r23t = Trim(CStr(wsCC.Cells(rCC, COL_CF23).Value))
             If r25t <> "" And r23t <> "" Then
-                ' "Beide"-rij: voeg toe aan reverse mapping
                 Dim p25 As Integer, p23 As Integer
                 p25 = InStr(r25t, ":"): p23 = InStr(r23t, ":")
                 Dim i25 As String, i23 As String
@@ -2442,7 +2449,6 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
                     rev23to25.Add i23, i25
                 End If
             ElseIf r25t = "" And r23t <> "" Then
-                ' "Enkel 2023"-rij: registreer het 2023-ID in enkel23Set
                 Dim e23 As String
                 e23 = NormId23(r23t)
                 If e23 <> "" And Not enkel23Set.Exists(e23) Then
@@ -2452,10 +2458,17 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
         Next rCC
     End If
 
-    ' ── 4. RefNr → CyFun 2023 ID via T-CyFunEssentiel ────────────────────────
+    ' ── 3. RefNr → CyFun 2023 ID via T-CyFunEssentiel ────────────────────────
     Set refNrMap = CreateObject("Scripting.Dictionary")
     Set rsCtrl = CreateObject("ADODB.Recordset")
+    On Error Resume Next
     rsCtrl.Open "SELECT RefNr, Requirement FROM [T - CyFunEssentiel]", conn
+    If Err.Number <> 0 Then
+        MsgBox "Tabel 'T - CyFunEssentiel' niet gevonden in de database.", vbExclamation, "GRC Import"
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
     Do While Not rsCtrl.EOF
         Dim refNr As Long
         refNr = CLng(rsCtrl.Fields("RefNr").Value)
@@ -2466,42 +2479,95 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
     Loop
     rsCtrl.Close
 
-    ' ── 5. Kwetsbaarheden laden + kolommen opbouwen ───────────────────────────
-    Dim vulnIDs()  As Long
+    ' ══════════════════════════════════════════════════════════════════════════
+    ' FASE 1 — Kwetsbaarheden en CIA-impact importeren op bestaande positie
+    ' ══════════════════════════════════════════════════════════════════════════
+
+    ' ── 4. Scan bestaande kwetsbaarheid-kolommen (rij 2, C+) ─────────────────
+    ' existingVulnCols: LCase(naam) → kolomnummer (van vorige import)
+    Dim existingVulnCols As Object
+    Set existingVulnCols = CreateObject("Scripting.Dictionary")
+    Dim usedEndCol As Long
+    usedEndCol = ws.UsedRange.Column + ws.UsedRange.Columns.Count - 1
+    Dim scanCol As Long
+    For scanCol = COL_V_START To usedEndCol
+        Dim scanHdr As String
+        scanHdr = Trim(CStr(ws.Cells(ROW_VULN, scanCol).Value))
+        If scanHdr <> "" Then
+            Dim scanKey As String
+            scanKey = LCase(scanHdr)
+            If Not existingVulnCols.Exists(scanKey) Then
+                existingVulnCols.Add scanKey, scanCol
+            End If
+        End If
+    Next scanCol
+
+    ' Bepaal startkolom voor nieuwe kwetsbaarheden
+    Dim nextNewCol As Long
+    If existingVulnCols.Count > 0 Then
+        Dim maxExistCol As Long: maxExistCol = COL_V_START - 1
+        Dim eKey As Variant
+        For Each eKey In existingVulnCols.Keys
+            Dim ec As Long: ec = CLng(existingVulnCols.Item(eKey))
+            If ec > maxExistCol Then maxExistCol = ec
+        Next eKey
+        nextNewCol = maxExistCol + 1
+    Else
+        nextNewCol = COL_V_START
+    End If
+
+    ' ── 5. Kwetsbaarheden laden; bijwerken op bestaande positie of nieuw toevoegen ──
+    Dim vulnIDs()   As Long
     Dim vulnNames() As String
-    Dim vulnC()    As Boolean, vulnI() As Boolean, vulnA() As Boolean
-    Dim vulnCols() As Long
+    Dim vulnC()     As Boolean, vulnI() As Boolean, vulnA() As Boolean
+    Dim vulnCols()  As Long
+    Dim matchedCols As Object  ' bijgehouden kolomnummers (voor orphan-detectie)
+    Set matchedCols = CreateObject("Scripting.Dictionary")
     nVuln = 0
     ReDim vulnIDs(0 To 99):   ReDim vulnNames(0 To 99)
     ReDim vulnC(0 To 99):     ReDim vulnI(0 To 99):   ReDim vulnA(0 To 99)
     ReDim vulnCols(0 To 99)
 
     Set rs = CreateObject("ADODB.Recordset")
-    rs.Open "SELECT ID, Vulnerability, Confidentialiteit, Integriteit, " & _
+    On Error Resume Next
+    rs.Open "SELECT Reference, Vulnerability, Confidentialiteit, Integriteit, " & _
             "Beschikbaarheid FROM [T - Vulnerabilities] ORDER BY Reference", conn
-
-    Dim nextCol As Long
-    nextCol = COL_V_START
+    If Err.Number <> 0 Then
+        MsgBox "Tabel 'T - Vulnerabilities' niet gevonden of ongeldige query." & vbCrLf & _
+               Err.Description, vbExclamation, "GRC Import"
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
 
     Do While Not rs.EOF And nVuln < 100
         Dim vID As Long, vNm As String
         Dim vC As Boolean, vI As Boolean, vA As Boolean
-        vID = CLng(rs.Fields("ID").Value)
+        vID = CLng(rs.Fields("Reference").Value)
         vNm = CStr(rs.Fields("Vulnerability").Value)
         vC  = CBool(rs.Fields("Confidentialiteit").Value)
         vI  = CBool(rs.Fields("Integriteit").Value)
         vA  = CBool(rs.Fields("Beschikbaarheid").Value)
 
+        ' Gebruik bestaande kolom (op naam) of maak nieuwe aan
+        Dim targetCol As Long
+        Dim vNmKey As String: vNmKey = LCase(vNm)
+        If existingVulnCols.Exists(vNmKey) Then
+            targetCol = CLng(existingVulnCols.Item(vNmKey))
+        Else
+            targetCol = nextNewCol
+            nextNewCol = nextNewCol + 1
+            ws.Columns(targetCol).ColumnWidth = 10
+        End If
+
         vulnIDs(nVuln)   = vID
         vulnNames(nVuln) = vNm
         vulnC(nVuln) = vC: vulnI(nVuln) = vI: vulnA(nVuln) = vA
-        vulnCols(nVuln)  = nextCol
+        vulnCols(nVuln)  = targetCol
+        If Not matchedCols.Exists(targetCol) Then matchedCols.Add targetCol, True
 
-        ' Kolombreedte instellen
-        ws.Columns(nextCol).ColumnWidth = 10
-
-        ' Rij 2: naam
-        With ws.Cells(ROW_VULN, nextCol)
+        ' Rij 2: naam (bijwerken)
+        With ws.Cells(ROW_VULN, targetCol)
             .Value = vNm
             .Interior.Color = IIf(nVuln Mod 2 = 0, RGB(208, 220, 243), RGB(255, 255, 255))
             .Font.Bold = True: .Font.Size = 9
@@ -2510,7 +2576,7 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
             .Borders.LineStyle = xlContinuous: .Borders.Weight = xlThin
         End With
 
-        ' Rij 3 (C), rij 4 (I), rij 5 (A): impact aanduiden
+        ' Rijen 3–5: CIA-impact (bijwerken)
         Dim cia As Integer
         Dim ciaRows(1 To 3) As Integer
         Dim ciaFlags(1 To 3) As Boolean
@@ -2518,12 +2584,11 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
         ciaRows(2) = ROW_I: ciaFlags(2) = vI
         ciaRows(3) = ROW_A: ciaFlags(3) = vA
         Dim ciaColors(1 To 3) As Long
-        ciaColors(1) = RGB(173, 216, 230)   ' blauw (C)
-        ciaColors(2) = RGB(198, 239, 206)   ' groen (I)
-        ciaColors(3) = RGB(255, 235, 156)   ' oranje (A)
-
+        ciaColors(1) = RGB(173, 216, 230)
+        ciaColors(2) = RGB(198, 239, 206)
+        ciaColors(3) = RGB(255, 235, 156)
         For cia = 1 To 3
-            With ws.Cells(ciaRows(cia), nextCol)
+            With ws.Cells(ciaRows(cia), targetCol)
                 If ciaFlags(cia) Then
                     .Value = ChrW(10004)
                     .Interior.Color = ciaColors(cia)
@@ -2537,57 +2602,124 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
             End With
         Next cia
 
-        ' Wis eventuele ✔-marks in data-kolom (bij heruitvoering)
+        ' Wis bestaande ✔-marks (worden in fase 2 opnieuw ingevuld)
         If lastRow >= ROW_DATA Then
-            ws.Range(ws.Cells(ROW_DATA, nextCol), _
-                     ws.Cells(lastRow, nextCol)).ClearContents
+            ws.Range(ws.Cells(ROW_DATA, targetCol), _
+                     ws.Cells(lastRow, targetCol)).ClearContents
         End If
 
-        nextCol = nextCol + 1
         nVuln = nVuln + 1
         rs.MoveNext
     Loop
     rs.Close
 
-    ' ── 6. Titel-merge bijwerken ──────────────────────────────────────────────
-    Dim lastVulnCol As Long
-    lastVulnCol = nextCol - 1
+    ' ── 6. Verwijder orphan-kolommen (bestonden maar niet meer in database) ───
+    ' Verzamel orphan-kolommen (in existingVulnCols maar NIET in matchedCols)
+    Dim orphanCols() As Long
+    Dim nOrphan As Integer: nOrphan = 0
+    Dim exKey2 As Variant
+    For Each exKey2 In existingVulnCols.Keys
+        Dim exColNr As Long: exColNr = CLng(existingVulnCols.Item(exKey2))
+        If Not matchedCols.Exists(exColNr) Then
+            ReDim Preserve orphanCols(0 To nOrphan)
+            orphanCols(nOrphan) = exColNr
+            nOrphan = nOrphan + 1
+        End If
+    Next exKey2
+    ' Sorteer descenderend (bubble sort) zodat rechts-naar-links wordt gewist
+    Dim si As Integer, sj As Integer, tmpCol As Long
+    For si = 0 To nOrphan - 2
+        For sj = 0 To nOrphan - 2 - si
+            If orphanCols(sj) < orphanCols(sj + 1) Then
+                tmpCol = orphanCols(sj): orphanCols(sj) = orphanCols(sj + 1): orphanCols(sj + 1) = tmpCol
+            End If
+        Next sj
+    Next si
+    ' Verwijder orphan-kolommen en pas vulnCols aan voor kolom-verschuiving
+    Dim oi As Integer, adj As Integer
+    For oi = 0 To nOrphan - 1
+        Dim delCol As Long: delCol = orphanCols(oi)
+        ws.Columns(delCol).Delete
+        For adj = 0 To nVuln - 1
+            If vulnCols(adj) > delCol Then vulnCols(adj) = vulnCols(adj) - 1
+        Next adj
+    Next oi
+
+    ' ── 7. Titelrij samenvoegen tot laatste kwetsbaarheid-kolom ──────────────
+    Dim lastVulnCol As Long: lastVulnCol = COL_V_START - 1
+    For v = 0 To nVuln - 1
+        If vulnCols(v) > lastVulnCol Then lastVulnCol = vulnCols(v)
+    Next v
+    On Error Resume Next
+    ws.Cells(ROW_TITLE, 1).MergeArea.UnMerge
+    On Error GoTo 0
     If lastVulnCol >= COL_V_START Then
         ws.Range(ws.Cells(ROW_TITLE, 1), ws.Cells(ROW_TITLE, lastVulnCol)).Merge
         ws.Cells(ROW_TITLE, 1).HorizontalAlignment = xlLeft
     End If
 
-    ' ── 7. LT koppelingen → ✔ plaatsen in control-rijen ─────────────────────
+    ' ══════════════════════════════════════════════════════════════════════════
+    ' FASE 2 — Alle kolommen overlopen: controls per kwetsbaarheid opzoeken en markeren
+    ' ══════════════════════════════════════════════════════════════════════════
+
+    ' ── 8. LT-tabel in geheugen laden: vulnID → set van ctrlRefs ─────────────
     Set afwList = CreateObject("Scripting.Dictionary")
     nMatched = 0
 
+    Dim vulnLTMap As Object
+    Set vulnLTMap = CreateObject("Scripting.Dictionary")
+
     Set rsLT = CreateObject("ADODB.Recordset")
+    On Error Resume Next
     rsLT.Open "SELECT Vulnerability, CyFunControl " & _
               "FROM [LT -  Vulnerability to control - fixed]", conn
+    If Err.Number <> 0 Then
+        MsgBox "Fout bij openen LT-tabel: " & Err.Description, vbExclamation, "GRC Import"
+        On Error GoTo 0
+        Exit Sub
+    End If
+    On Error GoTo 0
 
     Do While Not rsLT.EOF
-        Dim vulnId As Long, ctrlRef As Long
-        vulnId  = CLng(rsLT.Fields("Vulnerability").Value)
-        ctrlRef = CLng(rsLT.Fields("CyFunControl").Value)
+        Dim ltVId As Long, ltCRef As Long
+        ltVId  = CLng(rsLT.Fields("Vulnerability").Value)
+        ltCRef = CLng(rsLT.Fields("CyFunControl").Value)
+        If Not vulnLTMap.Exists(ltVId) Then
+            vulnLTMap.Add ltVId, CreateObject("Scripting.Dictionary")
+        End If
+        Dim ltDict As Object
+        Set ltDict = vulnLTMap.Item(ltVId)
+        If Not ltDict.Exists(ltCRef) Then ltDict.Add ltCRef, True
+        rsLT.MoveNext
+    Loop
+    rsLT.Close
 
-        If refNrMap.Exists(ctrlRef) Then
-            Dim id23v As String
-            id23v = NormId23(CStr(refNrMap.Item(ctrlRef)))
+    ' ── 9. Per kwetsbaarheid: popup tonen en controls markeren ───────────────
+    For v = 0 To nVuln - 1
+        Application.StatusBar = "Kwetsbaarheden importeren... (" & (v + 1) & "/" & nVuln & "): " & vulnNames(v)
+        DoEvents
 
-            Dim id25v As String
-            id25v = IIf(rev23to25.Exists(id23v), CStr(rev23to25.Item(id23v)), id23v)
+        If vulnLTMap.Exists(vulnIDs(v)) Then
+            Dim vLTDict As Object
+            Set vLTDict = vulnLTMap.Item(vulnIDs(v))
+            Dim ltRef As Variant
+            For Each ltRef In vLTDict.Keys
+                Dim ltCtrlRef As Long: ltCtrlRef = CLng(ltRef)
+                If refNrMap.Exists(ltCtrlRef) Then
+                    Dim id23v As String
+                    id23v = NormId23(CStr(refNrMap.Item(ltCtrlRef)))
 
-            Dim ctrlRow As Long
-            ctrlRow = 0
-            If ctrlRowMap.Exists(id25v) Then
-                ctrlRow = CLng(ctrlRowMap.Item(id25v))
-                nMatched = nMatched + 1
-            End If
+                    Dim id25v As String
+                    If rev23to25.Exists(id23v) Then
+                        id25v = CStr(rev23to25.Item(id23v))
+                    Else
+                        id25v = id23v
+                    End If
 
-            For v = 0 To nVuln - 1
-                If vulnIDs(v) = vulnId Then
-                    If ctrlRow > 0 Then
-                        ' ✔ in de kwetsbaarheid-kolom op de control-rij
+                    Dim ctrlRow As Long: ctrlRow = 0
+                    If ctrlRowMap.Exists(id25v) Then
+                        ctrlRow = CLng(ctrlRowMap.Item(id25v))
+                        nMatched = nMatched + 1
                         With ws.Cells(ctrlRow, vulnCols(v))
                             .Value = ChrW(10004)
                             .Interior.Color = RGB(198, 239, 206)
@@ -2599,8 +2731,7 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
                         Dim afwK As String
                         afwK = vulnNames(v) & "|" & id23v
                         If Not afwList.Exists(afwK) Then
-                            Dim cs As String
-                            cs = ""
+                            Dim cs As String: cs = ""
                             If vulnC(v) Then cs = cs & "C"
                             If vulnI(v) Then cs = cs & "I"
                             If vulnA(v) Then cs = cs & "A"
@@ -2613,15 +2744,13 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
                             afwList.Add afwK, Array(vulnNames(v), cs, id23v, reden)
                         End If
                     End If
-                    Exit For
                 End If
-            Next v
+            Next ltRef
         End If
-        rsLT.MoveNext
-    Loop
-    rsLT.Close
+    Next v
+    Application.StatusBar = False
 
-    ' ── 8. Afwijkingen-sheet bijwerken ────────────────────────────────────────
+    ' ── 9. Afwijkingen-sheet bijwerken ────────────────────────────────────────
     On Error Resume Next
     Set wsAfw = ThisWorkbook.Sheets("Afwijkingen")
     On Error GoTo 0

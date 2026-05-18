@@ -11,7 +11,9 @@
       "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\data\\\\repositories\")",
       "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\data\\\\template\")",
       "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\scripts\")",
-      "Bash(python scripts/build_grc.py)"
+      "Bash(python scripts/build_grc.py)",
+      "Bash(python -c ' *)",
+      "PowerShell(Stop-Process -Name \"EXCEL\" -Force -ErrorAction SilentlyContinue)"
     ]
   }
 }

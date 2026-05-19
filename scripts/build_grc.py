@@ -1703,8 +1703,10 @@ Sub ImportGeselecteerdeControls(conn As Object)
     rsCtrl.Close
 
     ' ── 3. rev23to25: LCase(2023-ID) → LCase(2025-ID) via CyFun Controls sheet ──
-    Dim rev23to25 As Object
-    Set rev23to25 = CreateObject("Scripting.Dictionary")
+    '       enkel23Set: 2023-IDs zonder 2025-equivalent
+    Dim rev23to25 As Object, enkel23Set As Object
+    Set rev23to25  = CreateObject("Scripting.Dictionary")
+    Set enkel23Set = CreateObject("Scripting.Dictionary")
     If Not wsCC Is Nothing Then
         Dim ccLast As Long
         ccLast = Application.Max( _
@@ -1724,14 +1726,21 @@ Sub ImportGeselecteerdeControls(conn As Object)
                 If i23 <> "" And i25 <> "" And Not rev23to25.Exists(i23) Then
                     rev23to25.Add i23, i25
                 End If
+            ElseIf r25t = "" And r23t <> "" Then
+                Dim e23 As String
+                e23 = NormId23(r23t)
+                If e23 <> "" And Not enkel23Set.Exists(e23) Then
+                    enkel23Set.Add e23, True
+                End If
             End If
         Next rCC
     End If
 
     ' ── 4. daIdColMap: DAID (Long) → RARM-kolom ─────────────────────────────────
     ' Koppel via naam: T - Dependent assets.DAName ↔ RARM rij 2 (LCase)
-    Dim daNameIdMap As Object
+    Dim daNameIdMap As Object, daIdNameMap As Object
     Set daNameIdMap = CreateObject("Scripting.Dictionary")
+    Set daIdNameMap = CreateObject("Scripting.Dictionary")
     Dim rsDA As Object
     Set rsDA = CreateObject("ADODB.Recordset")
     rsDA.Open "SELECT ID, DAName FROM [T - Dependent assets]", conn
@@ -1742,6 +1751,7 @@ Sub ImportGeselecteerdeControls(conn As Object)
         daNm = LCase(Trim(CStr(rsDA.Fields("DAName").Value)))
         If daNm <> "" And Not daNameIdMap.Exists(daNm) Then
             daNameIdMap.Add daNm, daId
+            daIdNameMap.Add daId, CStr(rsDA.Fields("DAName").Value)
         End If
         rsDA.MoveNext
     Loop
@@ -1769,6 +1779,8 @@ Sub ImportGeselecteerdeControls(conn As Object)
     ' ── 6. Lees LT - Selected controls to DA en schrijf vinkjes in RARM ─────────
     Dim nMatched As Long
     nMatched = 0
+    Dim afwList As Object          ' sleutel="DAID|id23" → Array(daNaam, id23, reden)
+    Set afwList = CreateObject("Scripting.Dictionary")
     Dim rsLT As Object
     Set rsLT = CreateObject("ADODB.Recordset")
     rsLT.Open "SELECT DAID, ControlReference FROM [LT - Selected controls to DA]", conn
@@ -1796,11 +1808,75 @@ Sub ImportGeselecteerdeControls(conn As Object)
                     .VerticalAlignment = xlCenter
                 End With
                 nMatched = nMatched + 1
+            Else
+                ' Control niet gevonden in 2025 — registreer afwijking
+                Dim afwKey As String
+                afwKey = ltDaId & "|" & id23v
+                If Not afwList.Exists(afwKey) Then
+                    Dim daNaamAfw As String
+                    If daIdNameMap.Exists(ltDaId) Then
+                        daNaamAfw = CStr(daIdNameMap.Item(ltDaId))
+                    Else
+                        daNaamAfw = CStr(ltDaId)
+                    End If
+                    Dim redenAfw As String
+                    If enkel23Set.Exists(id23v) Then
+                        redenAfw = "Enkel in CyFun 2023"
+                    Else
+                        redenAfw = "Niet gevonden in 2025"
+                    End If
+                    afwList.Add afwKey, Array(daNaamAfw, id23v, redenAfw)
+                End If
             End If
         End If
         rsLT.MoveNext
     Loop
     rsLT.Close
+
+    ' ── 7. Afwijkingen wegschrijven naar sheet "Controls 2023 / DA" ─────────────
+    Dim wsAfw As Worksheet
+    On Error Resume Next
+    Set wsAfw = ThisWorkbook.Sheets("Controls 2023 / DA")
+    On Error GoTo 0
+    If wsAfw Is Nothing Then
+        Set wsAfw = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsAfw.Name = "Controls 2023 / DA"
+    End If
+
+    ' Koptekst (enkel bij eerste aanmaak of als rij 1 leeg is)
+    If Trim(CStr(wsAfw.Cells(1, 1).Value)) = "" Then
+        With wsAfw.Cells(1, 1)
+            .Value = "Controls uit CyFun 2023 zonder equivalent in CyFun 2025"
+            .Font.Bold = True: .Font.Size = 11
+        End With
+        With wsAfw.Cells(2, 1): .Value = "Dependent Asset": .Font.Bold = True: End With
+        With wsAfw.Cells(2, 2): .Value = "2023 Control-ID":  .Font.Bold = True: End With
+        With wsAfw.Cells(2, 3): .Value = "Reden":            .Font.Bold = True: End With
+    End If
+
+    ' Wis vorige data (rij 3+)
+    Dim afwLast As Long
+    afwLast = wsAfw.Cells(wsAfw.Rows.Count, 1).End(xlUp).Row
+    If afwLast >= 3 Then wsAfw.Rows("3:" & afwLast).ClearContents
+
+    ' Schrijf afwijkingen gesorteerd op DA-naam
+    Dim afwRow As Long: afwRow = 3
+    Dim afwK As Variant
+    For Each afwK In afwList.Keys
+        Dim afwInfo As Variant
+        afwInfo = afwList.Item(afwK)
+        wsAfw.Cells(afwRow, 1).Value = afwInfo(0)
+        wsAfw.Cells(afwRow, 2).Value = afwInfo(1)
+        wsAfw.Cells(afwRow, 3).Value = afwInfo(2)
+        afwRow = afwRow + 1
+    Next afwK
+
+    ' Autofit kolommen
+    wsAfw.Columns("A:C").AutoFit
+
+    MsgBox "Import voltooid: " & nMatched & " controls gekoppeld." & vbCrLf & _
+           afwList.Count & " 2023-controls zonder 2025-equivalent opgeslagen in 'Controls 2023 / DA'.", _
+           vbInformation, "GRC Import"
 End Sub
 
 ' Opent het UserForm VulnPicker voor kwetsbaarheid-selectie in RARM-sheet

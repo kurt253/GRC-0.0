@@ -1833,14 +1833,14 @@ Sub ImportGeselecteerdeControls(conn As Object)
     Loop
     rsLT.Close
 
-    ' ── 7. Afwijkingen wegschrijven naar sheet "Controls 2023 / DA" ─────────────
+    ' ── 7. Afwijkingen wegschrijven naar sheet "Controls 2023 - DA" ─────────────
     Dim wsAfw As Worksheet
     On Error Resume Next
-    Set wsAfw = ThisWorkbook.Sheets("Controls 2023 / DA")
+    Set wsAfw = ThisWorkbook.Sheets("Controls 2023 - DA")
     On Error GoTo 0
     If wsAfw Is Nothing Then
         Set wsAfw = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
-        wsAfw.Name = "Controls 2023 / DA"
+        wsAfw.Name = "Controls 2023 - DA"
     End If
 
     ' Koptekst (enkel bij eerste aanmaak of als rij 1 leeg is)
@@ -1875,7 +1875,7 @@ Sub ImportGeselecteerdeControls(conn As Object)
     wsAfw.Columns("A:C").AutoFit
 
     MsgBox "Import voltooid: " & nMatched & " controls gekoppeld." & vbCrLf & _
-           afwList.Count & " 2023-controls zonder 2025-equivalent opgeslagen in 'Controls 2023 / DA'.", _
+           afwList.Count & " 2023-controls zonder 2025-equivalent opgeslagen in 'Controls 2023 - DA'.", _
            vbInformation, "GRC Import"
 End Sub
 

@@ -13,7 +13,10 @@
       "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\kurtm\\\\Documents\\\\GRC 0.0\\\\scripts\")",
       "Bash(python scripts/build_grc.py)",
       "Bash(python -c ' *)",
-      "PowerShell(Stop-Process -Name \"EXCEL\" -Force -ErrorAction SilentlyContinue)"
+      "PowerShell(Stop-Process -Name \"EXCEL\" -Force -ErrorAction SilentlyContinue)",
+      "Bash(python -c \"import pptx; print\\(pptx.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -c \"import pptx; print\\('ok', pptx.__version__\\)\")"
     ]
   }
 }

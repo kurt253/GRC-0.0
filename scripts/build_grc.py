@@ -1,6 +1,18 @@
 """
 GRC Tool — Excel Workbook Builder v0.3
 Voor overheidsorganisaties
+
+Dit script bouwt volledig automatisch een macro-enabled Excel-bestand (.xlsm) op
+voor het beheer van informatieveiligheid (GRC) binnen Belgische overheidsdiensten.
+
+Werkwijze in twee stappen:
+  1. openpyxl  → alle sheets, stijlen, formules, validaties en vertalingen worden
+                 statisch gebouwd en opgeslagen als tussenbestand (.xlsx).
+  2. win32com  → het .xlsx-bestand wordt heropend in Excel via COM-automatisering
+                 en VBA-code (modules, UserForms, Sheet-events) wordt geïnjecteerd.
+                 Resultaat wordt opgeslagen als .xlsm en het .xlsx-tussenbestand
+                 wordt verwijderd.
+
 Sheets (volgorde): Config | Info | Processen | Informatieassets | Verantwoordelijken
                    | Import & Export | Referentiewaarden | _Lang (verborgen)
 Output: ../data/template/GRC_Tool.xlsm
@@ -19,6 +31,10 @@ from openpyxl.formatting.rule import FormulaRule
 from openpyxl.workbook.defined_name import DefinedName
 
 # ── Paden & metadata ──────────────────────────────────────────────────────────
+# OUT_XLSX is een tijdelijk .xlsx-bestand; na VBA-injectie wordt het verwijderd.
+# CYFUN_SRC   : CyFun 2025 ESSENTIAL bronbestand (controls en assurance-niveaus)
+# MAPPING_SRC : mapping CyFun 2023 ↔ 2025 (beide richtingen)
+# CYFUN23_SRC : CyFun 2023 bronbestand (voor "Enkel 2023"-details)
 OUT      = Path(__file__).parent.parent / "data" / "template" / "GRC_Tool.xlsm"
 OUT_XLSX = OUT.with_suffix(".xlsx")   # tussenstap voor win32com
 CYFUN_SRC   = Path(__file__).parent.parent / "data" / "repositories" / "CyFun2025_Self-Assessment_tool_ESSENTIAL_v3.1.xlsx"
@@ -28,6 +44,11 @@ USERNAME = os.environ.get("USERNAME", os.environ.get("USER", "Onbekend"))
 NOW_STR  = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
 # ── Kleurenpalet ──────────────────────────────────────────────────────────────
+# Alle kleursleutels zijn hex-strings zonder '#'. Gebruik via fill(key) of C[key].
+# navy/blue_*  : primaire UI-kleuren (titelbalk, koppen, actieve velden)
+# grey_*       : neutrale achtergronden en randen
+# green/yellow/orange/red/purple : classificatieniveaus 1 t/m 5
+# accent/*     : tips-blokken, hint-teksten
 C = {
     "navy":          "0F2B46",
     "blue_mid":      "2563EB",
@@ -40,7 +61,7 @@ C = {
     "grey_dark":     "475569",
     "text":          "0F172A",
     "subtext":       "64748B",
-    # Classificatieniveaus
+    # Classificatieniveaus (1=Laag/groen … 4=Zeer Hoog/rood, 5=Classified/paars)
     "green":         "15803D",  "green_light":   "DCFCE7",
     "yellow":        "854D0E",  "yellow_light":  "FEF9C3",
     "orange":        "B45309",  "orange_light":  "FEF3C7",
@@ -52,27 +73,96 @@ C = {
 }
 
 # Vijf classificatieniveaus: index 0 = niveau 1 (Laag) … index 4 = niveau 5 (Classified)
+# Worden gebruikt door add_cls_pairs() en ref_dim_table() om CF-regels en legenda's op te bouwen.
 LEVEL_FILLS = ["green_light", "yellow_light", "orange_light", "red_light", "purple_light"]
 LEVEL_FONTS = ["green",       "yellow",       "orange",       "red",       "purple"]
 
 # ── Stijlhulpfuncties ─────────────────────────────────────────────────────────
-def fill(key): return PatternFill("solid", fgColor=C[key])
+def fill(key):
+    """Geeft een effen PatternFill terug voor kleursleutel key uit het palet C."""
+    return PatternFill("solid", fgColor=C[key])
+
 def font(size=10, bold=False, color="text", italic=False):
+    """
+    Maakt een Calibri Font-object aan.
+
+    Parameters
+    ----------
+    size   : int   — tekengrootte in punten (standaard 10)
+    bold   : bool  — vetgedrukt (standaard False)
+    color  : str   — sleutel in kleurenpalet C (standaard 'text' = bijna-zwart)
+    italic : bool  — cursief (standaard False)
+    """
     return Font(name="Calibri", size=size, bold=bold, color=C[color], italic=italic)
+
 def align(h="left", v="center", wrap=False, indent=0):
+    """
+    Maakt een Alignment-object aan.
+
+    Parameters
+    ----------
+    h      : str  — horizontaal uitlijnen ('left', 'center', 'right')
+    v      : str  — verticaal uitlijnen ('top', 'center', 'bottom')
+    wrap   : bool — regelterugloop (wrap_text)
+    indent : int  — inspringing in tekeneenheden
+    """
     return Alignment(horizontal=h, vertical=v, wrap_text=wrap, indent=indent)
+
 def border_all(color="grey_border"):
+    """
+    Geeft een Border-object terug met dunne rand rondom (alle 4 zijden gelijk).
+
+    Parameters
+    ----------
+    color : str — sleutel in kleurenpalet C (standaard 'grey_border')
+    """
     s = Side(style="thin", color=C[color])
     return Border(left=s, right=s, top=s, bottom=s)
+
 def set_col_widths(ws, widths):
+    """
+    Stelt kolombreedtes in voor worksheet ws op basis van een lijst met breedtes.
+    Kolom 1 (A) krijgt widths[0], kolom 2 (B) krijgt widths[1], enz.
+
+    Parameters
+    ----------
+    ws     : openpyxl.Worksheet
+    widths : list[float] — kolombreedtes in tekeneenheden
+    """
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-def no_gridlines(ws): ws.sheet_view.showGridLines = False
+
+def no_gridlines(ws):
+    """Verbergt het rasterpatroon op een worksheet voor een cleaner uiterlijk."""
+    ws.sheet_view.showGridLines = False
 
 # ── Taalformule ───────────────────────────────────────────────────────────────
+# LANG_CELL verwijst naar de dropdowncel op het Config-blad waar de gebruiker
+# NL, FR of EN kiest. Alle zichtbare teksten in het werkboek zijn formules
+# die via t(key) dynamisch de juiste kolom opzoeken in het verborgen _Lang-blad.
 LANG_CELL = "Config!$D$9"
 
 def t(key):
+    """
+    Genereert een Excel-formule die de vertaling van 'key' opzoekt in het
+    verborgen _Lang-blad en weergeeft in de taal die is ingesteld op Config!$D$9.
+
+    Werking
+    -------
+    - MATCH zoekt de sleutelwaarde (key) op in kolom A van _Lang (rijen 2–300).
+    - INDEX haalt de waarde op uit kolom B (NL), C (FR) of D (EN) naargelang
+      de taalinstelling in Config!$D$9.
+    - IFERROR toont '[key]' als de sleutel niet bestaat in _Lang — handig
+      om ontbrekende vertalingen snel te detecteren tijdens ontwikkeling.
+
+    Parameters
+    ----------
+    key : str — unieke sleutelwaarde zoals gedefinieerd in TRANSLATIONS
+
+    Geeft terug
+    -----------
+    str — een Excel-formulestring die in een cel geplaatst kan worden
+    """
     return (
         f'=IFERROR(INDEX(_Lang!$B$2:$D$300,'
         f'MATCH("{key}",_Lang!$A$2:$A$300,0),'
@@ -80,6 +170,11 @@ def t(key):
     )
 
 # ── Classificatiewaarden (5 niveaus) ─────────────────────────────────────────
+# CLS, ROLES en ASSET_TYPES worden opgeslagen in het verborgen _Lang-blad
+# (kolommen F/G/H voor NL/FR/EN) en via benoemde bereiken (cls_NL, roles_FR, …)
+# beschikbaar gesteld aan dropdownvalidaties in de gegevensbladen.
+# De dropdown-formule gebruikt INDIRECT("cls_"&Config!$D$9) zodat de lijst
+# automatisch wisselt wanneer de gebruiker de taal verandert.
 CLS = {
     "NL": ["Laag", "Gemiddeld", "Hoog", "Zeer Hoog", "Classified"],
     "FR": ["Faible", "Moyen", "Élevé", "Très élevé", "Classified"],
@@ -102,6 +197,11 @@ ASSET_TYPES = {
            "Service", "Document", "Person", "Process", "Other"],
 }
 # ── Vertalingstabel ───────────────────────────────────────────────────────────
+# TRANSLATIONS is een lijst van tuples: (sleutel, NL-tekst, FR-tekst, EN-tekst).
+# Bij het opbouwen van het werkboek worden alle tuples weggeschreven naar het
+# verborgen _Lang-blad (kolom A = sleutel, B = NL, C = FR, D = EN).
+# Elke cel die gebruikerstekst bevat roept t(sleutel) aan; de formule zoekt
+# op basis van de taalinstelling de juiste kolom op.
 TRANSLATIONS = [
     # Paginatitel Config / Chrome
     ("cfg_title_main",
@@ -484,7 +584,23 @@ TRANSLATIONS = [
 ]
 
 # ── VBA-macrocode ─────────────────────────────────────────────────────────────
+# Elke VBA-string wordt via win32com in het juiste VBComponent geïnjecteerd.
+# De strings bevatten volledig geldige VBA-code; Python-aanhalingstekens zijn
+# hier slechts de "verpakking" voor het transport naar de VBE.
+
 KWETS_SHEET_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module : Kwetsbaarheden (Worksheet)
+' Doel   : Laat de gebruiker met een dubbelklik een ✔-vinkje plaatsen of
+'          verwijderen in de matrix (rij 3+ / kolom 3+).
+'          Rijen 1-2 bevatten de titelregel en kwetsbaarheid-koppen;
+'          kolommen A-B bevatten Control ID en Richtlijn — beide zijn
+'          beschermde cellen en mogen niet worden gewijzigd.
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── Worksheet_BeforeDoubleClick ───────────────────────────────────────────────
+' Onderschept een dubbelklik in de matrix en schakelt het ✔-vinkje (U+2714)
+' aan of uit. Cancel = True voorkomt dat Excel het cel-bewerkingsvenster opent.
 Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
     If Target.Cells.Count > 1 Then Exit Sub
     If Target.Row < 3 Or Target.Column < 3 Then Exit Sub
@@ -492,6 +608,7 @@ Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean
     Dim sVal As String
     sVal = ""
     If Not IsError(Target.Value) Then sVal = CStr(Target.Value)
+    ' Toggle: vinkje aanwezig → verwijderen, afwezig → plaatsen
     If sVal = ChrW(10004) Then
         Target.Value = ""
     Else
@@ -503,6 +620,19 @@ End Sub
 '''
 
 INFO_ASSET_SHEET_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module : Information Assets (Worksheet)
+' Doel   : Vult kolom I ("Gebruikt in processen") automatisch bij
+'          bij elke activering van het blad.
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── Worksheet_Activate ───────────────────────────────────────────────────────
+' Wanneer de gebruiker het blad opent, worden kolom I (rijen 6-105) opnieuw
+' berekend door het Processes-blad te scannen.
+' Voor elk informatieasset (kolom B) wordt gecontroleerd of de naam voorkomt
+' in kolom K (Informatieassets-kolom) van elk proces.
+' De match is hoofdletterongevoelig (LCase) om tikfouten te vermijden.
+' AutoFit past de rijhoogte aan wanneer meerdere processen worden gevonden.
 Private Sub Worksheet_Activate()
     Dim procWs As Worksheet
     Dim r As Long, c As Long
@@ -510,10 +640,14 @@ Private Sub Worksheet_Activate()
     Application.ScreenUpdating = False
     Set procWs = ThisWorkbook.Sheets("Processes")
     Me.Range("I6:I105").ClearContents
+    ' ── Itereer over alle informatieassets (rij 6-105) ──────────────────────
     For r = 6 To 105
         assetNaam = CStr(Me.Cells(r, 2).Value)
         If assetNaam <> "" Then
             procList = ""
+            ' ── Zoek asset-naam terug in kolom K van elk proces ─────────────
+            ' Processen slagen meerdere asset-namen op als newline-gescheiden
+            ' tekst in kolom K; InStr detecteert deelstringmatches.
             For c = 6 To 105
                 pNaam = CStr(procWs.Cells(c, 2).Value)
                 If pNaam <> "" Then
@@ -532,6 +666,31 @@ End Sub
 '''
 
 DEP_ASSET_SHEET_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module : Dependent Assets (Worksheet)
+' Doel   : Berekent automatisch de volgende kolommen bij activering van het blad
+'          én bij wijziging van Security Objective-cellen (P/R/T = cols 16/18/20):
+'
+'   H (8)  = Gebruikt door processen (uit Processes kolom L, omgekeerde lookup)
+'   I (9)  = Gekoppelde informatieassets (via de proces-asset-koppeling)
+'   J (10) = Max. Confidentialiteit-requirement (max C van gekoppelde IA's)
+'   L (12) = Max. Integriteit-requirement (max I van gekoppelde processen)
+'   N (14) = Max. Beschikbaarheid-requirement (max A van gekoppelde processen)
+'   V (22) = Gap Confidentialiteit: IA-namen waarvoor C > C-objective
+'   W (23) = Gap Integriteit: procesnamen waarvoor I > I-objective
+'   X (24) = Gap Beschikbaarheid: procesnamen waarvoor A > A-objective
+'
+' Beveiligingsmodel: het blad is beveiligd (Contents=True), maar UserInterfaceOnly
+' laat VBA toe te schrijven zonder dat de gebruiker handmatig kan bewerken.
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── Worksheet_Activate ───────────────────────────────────────────────────────
+' Herberekent alle afgeleide kolommen voor alle afhankelijke assets (rij 6-105).
+' Volgorde van berekening:
+'   1. Verzamel gekoppelde processen (col H) via omgekeerde lookup in Processes!L
+'   2. Verzamel gekoppelde IA's (col I) via de informatieassets-kolommen van die processen
+'   3. Bereken max C/I/A requirements op basis van IA's en processen
+'   4. Bereken gap-analyse op basis van Security Objectives (cols P/R/T)
 Private Sub Worksheet_Activate()
     Dim procWs As Worksheet, iaWs As Worksheet
     Dim r As Long, c As Long, p As Long, ia As Long
@@ -546,6 +705,7 @@ Private Sub Worksheet_Activate()
     Me.Unprotect
     Set procWs = ThisWorkbook.Sheets("Processes")
     Set iaWs = ThisWorkbook.Sheets("Information Assets")
+    ' Reset de berekende kolommen vooraleer opnieuw te vullen
     Me.Range("H6:J105").ClearContents
     Me.Range("L6:L105").ClearContents
     Me.Range("N6:N105").ClearContents
@@ -555,26 +715,36 @@ Private Sub Worksheet_Activate()
         If depNaam <> "" Then
             procList = "": infoList = ""
             maxConf = 0: maxInt = 0: maxAvail = 0
+            ' ── Stap 1: zoek alle processen die deze DA gebruiken ────────────
+            ' Processes!L (kolom 12) bevat newline-gescheiden DA-namen per proces.
+            ' Omgekeerde lookup: als depNaam voorkomt in die kolom → proces is gekoppeld.
             For c = 6 To 105
                 pNaam = CStr(procWs.Cells(c, 2).Value)
                 If pNaam <> "" Then
                     If InStr(LCase(CStr(procWs.Cells(c, 12).Value)), LCase(depNaam)) > 0 Then
                         If procList <> "" Then procList = procList & Chr(10)
                         procList = procList & pNaam
+                        ' ── Stap 2a: max I en A via gekoppelde processen ─────
+                        ' Processen dragen I (col 6) en A (col 8) requirements bij.
                         v = procWs.Cells(c, 6).Value
                         If IsNumeric(v) And CInt(v) > maxInt Then maxInt = CInt(v)
                         v = procWs.Cells(c, 8).Value
                         If IsNumeric(v) And CInt(v) > maxAvail Then maxAvail = CInt(v)
+                        ' ── Stap 2b: verzamel gekoppelde IA's (deduplicatie) ─
+                        ' Processes!K (kolom 11) bevat newline-gescheiden IA-namen.
                         iaStr = CStr(procWs.Cells(c, 11).Value)
                         If iaStr <> "" Then
                             parts = Split(iaStr, Chr(10))
                             For p = 0 To UBound(parts)
                                 iaName = Trim(parts(p))
                                 If iaName <> "" Then
+                                    ' Voeg IA toe aan infoList als nog niet aanwezig
                                     If InStr(Chr(10) & infoList & Chr(10), Chr(10) & iaName & Chr(10)) = 0 Then
                                         If infoList <> "" Then infoList = infoList & Chr(10)
                                         infoList = infoList & iaName
                                     End If
+                                    ' ── Stap 2c: max C via IA-confidentialiteit ──
+                                    ' Informatieassets!F (kolom 6) = C-score.
                                     For ia = 6 To 105
                                         If LCase(CStr(iaWs.Cells(ia, 2).Value)) = LCase(iaName) Then
                                             v = iaWs.Cells(ia, 6).Value
@@ -593,10 +763,16 @@ Private Sub Worksheet_Activate()
             If maxConf > 0 Then Me.Cells(r, 10) = maxConf
             If maxInt > 0 Then Me.Cells(r, 12) = maxInt
             If maxAvail > 0 Then Me.Cells(r, 14) = maxAvail
+            ' ── Stap 3: lees Security Objectives (editeerbaar door gebruiker) ─
+            ' Kolom P(16)=C-obj, R(18)=I-obj, T(20)=A-obj
             objConf = 0: objInt = 0: objAvail = 0
             If IsNumeric(Me.Cells(r, 16).Value) Then objConf = CInt(Me.Cells(r, 16).Value)
             If IsNumeric(Me.Cells(r, 18).Value) Then objInt = CInt(Me.Cells(r, 18).Value)
             If IsNumeric(Me.Cells(r, 20).Value) Then objAvail = CInt(Me.Cells(r, 20).Value)
+            ' ── Stap 4: Gap-analyse per CIA-dimensie ─────────────────────────
+            ' Gaplogica: als requirement > objective én de lijst niet leeg is →
+            ' toon de namen van de entiteiten die het tekort veroorzaken.
+            ' Confidentialiteit-gap: welke IA's hebben C > C-objective?
             gapConf = ""
             If objConf > 0 And maxConf > objConf And infoList <> "" Then
                 parts = Split(infoList, Chr(10))
@@ -617,6 +793,7 @@ Private Sub Worksheet_Activate()
                 Next p
             End If
             Me.Cells(r, 22) = gapConf
+            ' Integriteit-gap: welke processen hebben I > I-objective?
             gapInt = ""
             If objInt > 0 And maxInt > objInt And procList <> "" Then
                 parts = Split(procList, Chr(10))
@@ -637,6 +814,7 @@ Private Sub Worksheet_Activate()
                 Next p
             End If
             Me.Cells(r, 23) = gapInt
+            ' Beschikbaarheid-gap: welke processen hebben A > A-objective?
             gapAvail = ""
             If objAvail > 0 And maxAvail > objAvail And procList <> "" Then
                 parts = Split(procList, Chr(10))
@@ -660,10 +838,16 @@ Private Sub Worksheet_Activate()
             If procList <> "" Or infoList <> "" Then Me.Rows(r).AutoFit
         End If
     Next r
+    ' Herstel bladbeveiliging — UserInterfaceOnly laat toekomstige macro-aanroepen toe
     Me.Protect DrawingObjects:=True, Contents:=True, Scenarios:=True, UserInterfaceOnly:=True, AllowFiltering:=True, AllowSorting:=True
     Application.ScreenUpdating = True
 End Sub
 
+' ── Worksheet_BeforeDoubleClick (Overarching-kolom F) ────────────────────────
+' Laat de gebruiker dubbelklikken op kolom F (Overarching) om het ✔-vinkje
+' te plaatsen of te verwijderen. Overarching = True betekent dat deze DA
+' een organisatorische of infrastructurele asset is die van toepassing is
+' op alle processen, ook als er geen expliciete koppeling bestaat.
 Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
     If Target.Cells.Count > 1 Then Exit Sub
     If Target.Row < 6 Or Target.Row > 105 Then Exit Sub
@@ -678,6 +862,11 @@ Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean
     End If
 End Sub
 
+' ── Worksheet_Change ─────────────────────────────────────────────────────────
+' Herberekent de gap-analyse wanneer de gebruiker een Security Objective-waarde
+' (kolommen P/R/T = 16/18/20) aanpast — zonder het volledige blad opnieuw te
+' activeren. rowDone() voorkomt dubbele berekening wanneer meerdere cellen
+' tegelijk worden gewijzigd (bv. via Plakken).
 Private Sub Worksheet_Change(ByVal Target As Range)
     Dim cell As Range
     Dim hasObjChange As Boolean
@@ -792,6 +981,24 @@ End Sub
 '''
 
 USERFORM_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module  : AssetPicker (UserForm)
+' Doel    : Popup-dialoogvenster waarmee de gebruiker één of meer assets
+'           koppelt aan een proces.
+' Gebruik : Verschijnt automatisch wanneer de gebruiker op kolom K
+'           (Informatieassets) of kolom L (Afhankelijke assets) klikt in
+'           het Processes-blad. De bronsheet en doelkolom worden doorgegeven
+'           via globale variabelen in GRC_Macros:
+'             g_TargetRow       — rijnummer in Processes
+'             g_ProcesNaam      — naam van het geselecteerde proces (voor caption)
+'             g_PickerSourceSheet — "Information Assets" of "Dependent Assets"
+'             g_PickerTargetCol — 11 (K) of 12 (L)
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── UserForm_Initialize ───────────────────────────────────────────────────────
+' Vult de listbox met alle asset-namen uit de bronsheet (rijen 6-105, kolom B).
+' Reeds geselecteerde assets (aanwezig in de huidige celwaarde) worden
+' automatisch aangevinkt. De vergelijking is hoofdletterongevoelig.
 Private Sub UserForm_Initialize()
     Me.Caption = "Assets voor: " & GRC_Macros.g_ProcesNaam
     lstAssets.Clear
@@ -818,6 +1025,10 @@ Private Sub UserForm_Initialize()
     Next r
 End Sub
 
+' ── btnOK_Click ──────────────────────────────────────────────────────────────
+' Bouwt een newline-gescheiden string van alle aangevinkte asset-namen en
+' schrijft die terug naar de doelcel in het Processes-blad.
+' AutoFit past de rijhoogte aan voor meerdere gekoppelde assets.
 Private Sub btnOK_Click()
     Dim result As String: result = ""
     Dim i As Long
@@ -835,6 +1046,8 @@ Private Sub btnOK_Click()
     procWs.Activate
 End Sub
 
+' ── btnAnnuleer_Click ─────────────────────────────────────────────────────────
+' Sluit het formulier zonder wijzigingen op te slaan.
 Private Sub btnAnnuleer_Click()
     Unload Me
     ThisWorkbook.Sheets("Processes").Activate
@@ -842,6 +1055,19 @@ End Sub
 '''
 
 RARM_SHEET_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module  : RARM (Worksheet)
+' Doel    : Risk Assessment & Remediation Matrix — koppelt afhankelijke assets
+'           (DA-kolommen) aan CyFun 2025 controls (rijen).
+'           Rij 2 = DA-namen  |  Rij 3 = geselecteerde kwetsbaarheden per DA
+'           Rij 4+ = CyFun 2025 control-rijen
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── Worksheet_Activate ───────────────────────────────────────────────────────
+' Bij elke activering: synchroniseer de DA-kolommen met de Dependent Assets-sheet
+' (SyncRARMKolommen) en herkleur de matrix (KleurAlleRARMKolommen).
+' EnableEvents = False voorkomt dat de SyncRARMKolommen-aanroep zelf opnieuw
+' een Activate-event triggert.
 Private Sub Worksheet_Activate()
     Application.EnableEvents = False
     Application.ScreenUpdating = False
@@ -851,6 +1077,11 @@ Private Sub Worksheet_Activate()
     Application.ScreenUpdating = True
 End Sub
 
+' ── Worksheet_BeforeDoubleClick ───────────────────────────────────────────────
+' Schakelt een ✔-vinkje aan/uit in de datacellen van de RARM-matrix (rij 4+,
+' kolom 4+). Cellen in rijen 1-3 of kolommen 1-3 zijn beschermde headers.
+' Extra veiligheid: als kolom A van de gerichte rij leeg is, is er geen
+' control gedefinieerd → vinkje wordt genegeerd.
 Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
     If Target.Cells.Count > 1 Then Exit Sub
     If Target.Row < 4 Then Exit Sub
@@ -866,6 +1097,12 @@ Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean
     End If
 End Sub
 
+' ── Worksheet_SelectionChange ─────────────────────────────────────────────────
+' Wanneer de gebruiker een cel in rij 3 (kwetsbaarheden-rij) selecteert vanaf
+' kolom E (5+), wordt automatisch het VulnPicker-formulier geopend.
+' g_RARMCol wordt ingesteld zodat het formulier weet voor welke DA-kolom
+' de kwetsbaarheden worden geselecteerd.
+' EnableEvents = False voorkomt een herhaalde trigger vanuit het formulier.
 Private Sub Worksheet_SelectionChange(ByVal Target As Range)
     If Target.Cells.Count > 1 Then Exit Sub
     If Target.Row <> 3 Then Exit Sub
@@ -877,6 +1114,26 @@ End Sub
 '''
 
 VULNPICKER_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module  : VulnPicker (UserForm)
+' Doel    : Popup-dialoogvenster om kwetsbaarheden + kanswaarden (1-4) te
+'           koppelen aan een afhankelijke asset (DA) in de RARM-matrix.
+'           Rij 3 van de RARM-sheet bevat per DA-kolom de geselecteerde
+'           kwetsbaarheden in het formaat: "VulnNaam (prob), VulnNaam2 (prob)"
+' Opbouw  : Het formulier bevat een scrollbaar frame (frmVulns) dat dynamisch
+'           wordt gevuld met CheckBox + ComboBox per kwetsbaarheid.
+'           De kwetsbaarheden-namen staan in rij 2 van het Kwetsbaarheden-blad
+'           vanaf kolom C.
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── UserForm_Initialize ───────────────────────────────────────────────────────
+' Vult het scrollbare frame dynamisch:
+'   - Leest kwetsbaarheden-namen uit Kwetsbaarheden!rij 2, kolom C+
+'   - Parseert de bestaande celwaarde in RARM!rij 3 naar een dictionary
+'     {kwetsbaarheid → kans (1-4)} zodat eerder gekozen selecties bewaard blijven
+'   - Voegt per kwetsbaarheid een CheckBox (naam) + ComboBox (kans 1-4) toe
+'   - IIf-constructie voor caption: toon DA-naam als die beschikbaar is,
+'     anders een generieke titel
 Private Sub UserForm_Initialize()
     Dim wsK As Worksheet, wsR As Worksheet
     On Error Resume Next
@@ -890,11 +1147,14 @@ Private Sub UserForm_Initialize()
     If Not wsR Is Nothing Then
         daName = CStr(wsR.Cells(2, GRC_Macros.g_RARMCol).Value)
     End If
+    ' IIf is VBA's ternaire operator: als daName niet leeg → "voor: DA-naam", anders generieke titel
     Me.Caption = IIf(daName <> "", "Kwetsbaarheden voor: " & daName, "Kwetsbaarheden selecteren")
     lblTitel.Caption = Me.Caption
 
-    ' Parse existing selection into Dictionary: vname -> probability (1-4)
-    ' Storage format: "VulnName (2), VulnName2 (3)"
+    ' ── Bestaande selectie inlezen naar Dictionary: vname → kans (1-4) ──────
+    ' Opslagformaat in RARM rij 3: "VulnName (2), VulnName2 (3)"
+    ' InStrRev zoekt het laatste " (" om kans-suffix te scheiden van naam,
+    ' wat robuuster is dan een eenvoudige Split (namen kunnen spaties bevatten).
     Dim selDict As Object
     Set selDict = CreateObject("Scripting.Dictionary")
     If Not wsR Is Nothing Then
@@ -923,7 +1183,11 @@ Private Sub UserForm_Initialize()
         End If
     End If
 
-    ' Dynamically add CheckBox + ComboBox (1-4) rows to frmVulns
+    ' ── Dynamisch CheckBox + ComboBox toevoegen per kwetsbaarheid ───────────
+    ' Elke kwetsbaarheid krijgt een rij in het scrollbare frame:
+    '   - CheckBox (links, 220 pt breed): naam van de kwetsbaarheid
+    '   - ComboBox (rechts, 162 pt breed): kans 1–4 (standaard = 2)
+    ' Rijen worden gestapeld met stap 22 punten; ScrollHeight past zich aan.
     Dim rowTop As Long
     rowTop = 4
     Dim col As Long
@@ -952,12 +1216,12 @@ Private Sub UserForm_Initialize()
         cmb.Width = 162
         cmb.Height = 18
         cmb.Font.Size = 9
-        cmb.Style = 2   ' fmStyleDropDownList
+        cmb.Style = 2   ' fmStyleDropDownList — voorkomt vrije tekstinvoer
         cmb.AddItem "1 - Not probable"
         cmb.AddItem "2 - Low probability"
         cmb.AddItem "3 - Medium probability"
         cmb.AddItem "4 - High probability"
-        cmb.ListIndex = 1  ' default = 2 (Low probability)
+        cmb.ListIndex = 1  ' standaard = index 1 = "2 - Low probability"
 
         Dim isSelected As Boolean
         isSelected = False
@@ -978,6 +1242,12 @@ Private Sub UserForm_Initialize()
     frmVulns.ScrollHeight = rowTop + 4
 End Sub
 
+' ── btnOK_Click ──────────────────────────────────────────────────────────────
+' Itereert over alle dynamisch aangemaakte controls in frmVulns.
+' Voor elke aangevinkte CheckBox wordt "VulnNaam (kans)" aan het resultaat
+' toegevoegd. De kans wordt gehaald uit de gekoppelde ComboBox (ListIndex + 1).
+' Resultaat wordt geschreven naar RARM!rij3!g_RARMCol en de kleuring
+' wordt hersteld via KleurAlleRARMKolommen.
 Private Sub btnOK_Click()
     Dim wsR As Worksheet, wsK As Worksheet
     On Error Resume Next
@@ -1015,20 +1285,35 @@ Private Sub btnOK_Click()
     GRC_Macros.KleurAlleRARMKolommen
 End Sub
 
+' ── btnAnnuleer_Click ─────────────────────────────────────────────────────────
+' Sluit het formulier zonder wijzigingen.
 Private Sub btnAnnuleer_Click()
     Unload Me
 End Sub
 '''
 
 PROC_SHEET_CODE = '''\
+' ══════════════════════════════════════════════════════════════════════════════
+' Module  : Processes (Worksheet)
+' Doel    : Opent automatisch de AssetPicker-popup wanneer de gebruiker
+'           klikt op kolom K (Informatieassets, index 11) of kolom L
+'           (Afhankelijke assets, index 12) in het Processes-blad.
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── Worksheet_SelectionChange ─────────────────────────────────────────────────
+' Detecteert een selectie in de data-kolommen K of L en delegeert naar
+' GRC_Macros.TonenAssetPicker met de juiste bronsheet en doelkolom.
+' EnableEvents = False voorkomt herhaalde triggers terwijl het formulier actief is.
 Private Sub Worksheet_SelectionChange(ByVal Target As Range)
     If Target.Cells.Count = 1 Then
         If Target.Row >= 6 And Target.Row <= 105 Then
             If Target.Column = 11 Or Target.Column = 12 Then
                 Application.EnableEvents = False
                 If Target.Column = 11 Then
+                    ' Kolom K = Informatieassets: bronsheet is "Information Assets"
                     GRC_Macros.TonenAssetPicker Target.Row, "Information Assets", 11
                 Else
+                    ' Kolom L = Afhankelijke assets: bronsheet is "Dependent Assets"
                     GRC_Macros.TonenAssetPicker Target.Row, "Dependent Assets", 12
                 End If
                 Application.EnableEvents = True
@@ -1041,42 +1326,77 @@ End Sub
 VBA_CODE = r'''Attribute VB_Name = "GRC_Macros"
 Option Explicit
 
-Public g_TargetRow As Long         ' Onthoudt welke rij in Processen geklikt werd
-Public g_ProcesNaam As String      ' Naam van het geselecteerde proces
+' ══════════════════════════════════════════════════════════════════════════════
+' Module  : GRC_Macros (Standaardmodule)
+' Doel    : Centrale module voor alle import/export-macros en hulpfuncties
+'           van de GRC Tool. Alle importoperaties maken gebruik van ADO
+'           (ADODB.Connection / ADODB.Recordset) om gegevens uit een MS
+'           Access-database te lezen.
+' Afhankelijkheden:
+'   - Microsoft Access Database Engine (ACE 12.0 of Jet 4.0)
+'   - UserForms: AssetPicker, VulnPicker
+'   - Bladen: Processes, Information Assets, Dependent Assets, RARM,
+'             Kwetsbaarheden, CyFun Controls
+' ══════════════════════════════════════════════════════════════════════════════
+
+' ── Globale toestandsvariabelen ───────────────────────────────────────────────
+' Deze variabelen worden ingesteld door de Worksheet_SelectionChange-handlers
+' en doorgegeven aan de UserForms.
+Public g_TargetRow As Long           ' Onthoudt welke rij in Processen geklikt werd
+Public g_ProcesNaam As String        ' Naam van het geselecteerde proces (voor caption AssetPicker)
 Public g_PickerSourceSheet As String ' Bronblad voor de picker (Informatieassets / Afhankelijke assets)
-Public g_PickerTargetCol As Long   ' Doelkolom in Processen (11 = info assets, 12 = afhankelijke assets)
-Public g_RARMCol As Long           ' Kolom in RARM-sheet waarop geklikt werd (vuln picker)
+Public g_PickerTargetCol As Long     ' Doelkolom in Processen (11 = info assets, 12 = afhankelijke assets)
+Public g_RARMCol As Long             ' Kolom in RARM-sheet waarop geklikt werd (vuln picker)
 
 ' GRC Tool v0.3 - Import & Export via MS Access (ADO)
 
-' Zet classificatietekst of -cijfer om naar code 1-5
+' ── MapCls ────────────────────────────────────────────────────────────────────
+' Zet een classificatietekst of -cijfer (uit Access) om naar een geheel getal 1-5.
+' Accepteert zowel numerieke strings ("3") als tekstwaarden in NL/FR/EN.
+' Geeft 0 terug als de waarde niet herkend wordt (zodat de cel leeg blijft).
+' De meertalige InStr-checks dekken de volledige CLS-woordenschat (zie Python).
 Private Function MapCls(val As String) As Integer
     Dim s As String
     s = LCase(Trim(val))
     Dim n As Integer
     n = 0
+    ' Probeer eerst numerieke conversie (snelste pad voor databases die cijfers opslaan)
     On Error Resume Next
     n = CInt(s)
     On Error GoTo 0
     If n >= 1 And n <= 5 Then MapCls = n: Exit Function
+    ' Tekstuele match in NL, FR en EN (niet-casegevoelig door LCase hierboven)
     If InStr(s, "kritiek") > 0 Or InStr(s, "critique") > 0 Or InStr(s, "critical") > 0 Then
         MapCls = 5
     ElseIf InStr(s, "zeer hoog") > 0 Or InStr(s, "very high") > 0 Or InStr(s, "tr") > 0 And InStr(s, "s " & Chr(233)) > 0 Then
-        MapCls = 4
+        MapCls = 4   ' "Très élevé" → Chr(233) = é
     ElseIf InStr(s, "hoog") > 0 Or InStr(s, "high") > 0 Or InStr(s, Chr(233) & "lev") > 0 Then
-        MapCls = 3
+        MapCls = 3   ' "Élevé" → Chr(233) = é
     ElseIf InStr(s, "gemiddeld") > 0 Or InStr(s, "moyen") > 0 Or InStr(s, "medium") > 0 Then
         MapCls = 2
     ElseIf InStr(s, "laag") > 0 Or InStr(s, "faible") > 0 Or InStr(s, "low") > 0 Then
         MapCls = 1
     Else
-        MapCls = 0
+        MapCls = 0   ' onbekende waarde → cel blijft leeg
     End If
 End Function
 
-' Haal veldwaarde op — pass 1: exacte match, pass 2: gedeeltelijke match
+' ── FieldVal ──────────────────────────────────────────────────────────────────
+' Leest een veldwaarde uit een ADODB.Recordset op basis van één of meer
+' kandidaat-namen (ParamArray).
+' Twee-staps zoekstrategie (twee passen) voor robuuste kolomherkenning:
+'   Pass 1 (exacte match): LCase(fld.Name) = LCase(kandidaat)
+'          — snel en precies voor bekende kolomnamen
+'   Pass 2 (gedeeltelijke match): InStr(LCase(fld.Name), LCase(kandidaat)) > 0
+'          — als fallback voor databases met langere of afwijkende kolomnamen
+' Geeft "" terug als geen match gevonden of als de veldwaarde NULL is.
+'
+' Voorbeeld:
+'   FieldVal(rs, "naam", "name", "nom") vindt zowel "Naam", "ProcessNaam"
+'   (pass 2) als "Nom du processus" (pass 2) in de recordset.
 Private Function FieldVal(rs As Object, ParamArray names() As Variant) As String
     Dim n As Variant, fld As Object
+    ' ── Pass 1: exacte naamvergelijking ──────────────────────────────────────
     For Each n In names
         For Each fld In rs.Fields
             If LCase(Trim(fld.Name)) = LCase(Trim(CStr(n))) Then
@@ -1085,6 +1405,7 @@ Private Function FieldVal(rs As Object, ParamArray names() As Variant) As String
             End If
         Next fld
     Next n
+    ' ── Pass 2: deelstringvergelijking (fallback) ─────────────────────────────
     For Each n In names
         For Each fld In rs.Fields
             If InStr(LCase(fld.Name), LCase(Trim(CStr(n)))) > 0 Then
@@ -1096,7 +1417,13 @@ Private Function FieldVal(rs As Object, ParamArray names() As Variant) As String
     FieldVal = ""
 End Function
 
-' Diagnostiek: toont alle tabellen + queries met veldnamen en SQL
+' ── VeldenTonen ─────────────────────────────────────────────────────────────
+' Diagnostisch hulpprogramma: opent een Access-database, leest het schema
+' (tabellen via adSchemaTables=20, queries via adSchemaViews=23) en
+' schrijft alle tabel-/veldnamen en query-SQL naar een nieuw werkblad.
+' Nuttig bij het debuggen van importproblemen met een onbekende databasestructuur.
+' Het resultaat wordt niet via MsgBox getoond (te lang) maar weggeschreven naar
+' een nieuw Workbook.
 Sub VeldenTonen()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -1172,7 +1499,12 @@ Sub VeldenTonen()
     MsgBox "Diagnostiek geschreven naar nieuw werkblad.", vbInformation, "GRC Diagnostiek"
 End Sub
 
-' Open Access-database via ADO (probeert ACE 12.0, dan Jet 4.0)
+' ── OpenAccess ───────────────────────────────────────────────────────────────
+' Opent een verbinding naar een Access-database via ADODB.
+' Probeert eerst de modernere ACE 12.0-driver; valt terug op de oudere
+' Jet 4.0-driver voor compatibiliteit met systemen zonder Access geïnstalleerd.
+' Chr(239) = ï (geïnstalleerd) — nodig omdat VBA-strings geen UTF-8 zijn.
+' Geeft Nothing terug en toont een foutmelding als beide drivers falen.
 Private Function OpenAccess(dbPath As String) As Object
     Dim conn As Object
     Set conn = CreateObject("ADODB.Connection")
@@ -1180,6 +1512,7 @@ Private Function OpenAccess(dbPath As String) As Object
     conn.Open "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=" & dbPath & ";"
     If Err.Number <> 0 Then
         Err.Clear
+        ' Fallback: Jet 4.0 voor oudere Windows-installaties
         conn.Open "Provider=Microsoft.Jet.OLEDB.4.0;Data Source=" & dbPath & ";"
     End If
     On Error GoTo 0
@@ -1193,7 +1526,12 @@ Private Function OpenAccess(dbPath As String) As Object
     End If
 End Function
 
-' Importeer Processen uit Access-tabel "T - Processes in scope"
+' ── ImportProcessen ──────────────────────────────────────────────────────────
+' Importeert processen uit de Access-tabel "T - Processes in scope" naar het
+' Processes-blad (rijen 6-105). Leegt eerst de doelkolommen B-L vooraleer
+' nieuwe data te schrijven.
+' Na het inlezen van de basisgegevens worden via VulGekoppeldeAssets en
+' VulGekoppeldeAfhankelijkeAssets ook de gekoppelde assets opgehaald.
 Sub ImportProcessen()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -1252,7 +1590,29 @@ Sub ImportProcessen()
     MsgBox destRow - 6 & " processen ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
 End Sub
 
-' Generieke functie: koppelt een asset-tabel aan processen via een koppelingstabel
+' ── VulGekoppeldeLijst ───────────────────────────────────────────────────────
+' Generieke helper: koppelt een asset-tabel aan processen via een many-to-many
+' koppelingstabel (junction table). Schrijft de gekoppelde asset-namen als
+' newline-gescheiden string naar een doelkolom in het Processes-blad.
+'
+' Werkwijze in 6 stappen:
+'   1. Detecteer de FK-veldnamen in de koppelingstabel via kolomnaam-heuristieken
+'   2. Detecteer de naam-kolom in "T - Processes in scope"
+'   3. Detecteer de naam-kolom in de asset-tabel
+'   4. Voer een JOIN-query uit om procesvelde (PNaam) en asset-naam (ANaam) op te halen
+'   5. Bouw een in-memory map {procesnaam → asset-namen} op met array-buffers
+'      (geen Scripting.Dictionary voor betere compatibiliteit)
+'   6. Schrijf de asset-namen per process naar de doelkolom
+'
+' Parameters
+' ----------
+' conn          : ADODB.Connection — open verbinding met de Access-database
+' ws            : Worksheet        — doelblad (Processes)
+' startRow/endRow : Long           — bereik van datarijen in ws (bv. 6-105)
+' junctionTable : String           — naam van de koppelingstabel (bv. "LT - Information Assets to Processes")
+' assetTable    : String           — naam van de asset-tabel (bv. "T - Information Assets")
+' assetKwd1/2   : String           — zoekwoorden voor het FK-veld in junctionTable
+' targetCol     : Long             — doelkolom in ws (11 = K of 12 = L)
 Private Sub VulGekoppeldeLijst(conn As Object, ws As Worksheet, startRow As Long, endRow As Long, _
                                 junctionTable As String, assetTable As String, _
                                 assetKwd1 As String, assetKwd2 As String, targetCol As Long)
@@ -1370,19 +1730,30 @@ Private Sub VulGekoppeldeLijst(conn As Object, ws As Worksheet, startRow As Long
     Next r
 End Sub
 
-' Vult kolom K (11) van Processen via koppelingstabel voor informateassets
+' ── VulGekoppeldeAssets ──────────────────────────────────────────────────────
+' Specifieke wrapper: vult kolom K (11) van het Processes-blad met de namen
+' van gekoppelde informatieassets via koppelingstabel "LT - Information Assets to Processes".
 Private Sub VulGekoppeldeAssets(conn As Object, ws As Worksheet, startRow As Long, endRow As Long)
     VulGekoppeldeLijst conn, ws, startRow, endRow, _
         "LT - Information Assets to Processes", "T - Information Assets", "asset", "informat", 11
 End Sub
 
-' Vult kolom L (12) van Processen via koppelingstabel voor afhankelijke assets
+' ── VulGekoppeldeAfhankelijkeAssets ──────────────────────────────────────────
+' Specifieke wrapper: vult kolom L (12) van het Processes-blad met de namen
+' van gekoppelde afhankelijke assets via "LT - Dependent assets to Processes".
 Private Sub VulGekoppeldeAfhankelijkeAssets(conn As Object, ws As Worksheet, startRow As Long, endRow As Long)
     VulGekoppeldeLijst conn, ws, startRow, endRow, _
         "LT - Dependent assets to Processes", "T - Dependent assets", "depend", "", 12
 End Sub
 
-' Importeer alles in één stap vanuit één Access-database
+' ── ImportAlles ──────────────────────────────────────────────────────────────
+' Voert alle importoperaties uit in één workflow vanuit één Access-database:
+'   1. Informatieassets   → blad "Information Assets"
+'   2. Afhankelijke assets → blad "Dependent Assets" (incl. C/I/A objectives)
+'   3. Processen          → blad "Processes" (incl. gekoppelde assets)
+'   4. RefreshRARMKolommen — herlaadt DA-kolomkoppen in RARM
+'   5. CoreImportKwetsbaarheden — kwetsbaarheden + controls importeren
+' Aan het einde worden de RARM-kleuren bijgewerkt via KleurAlleRARMKolommen.
 Sub ImportAlles()
     Dim fd As FileDialog
     Dim conn As Object
@@ -1521,7 +1892,10 @@ Sub ImportAlles()
            " afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
 End Sub
 
-' Importeer alleen de koppelingen (standalone knop op Import & Export)
+' ── ImportKoppelingen ────────────────────────────────────────────────────────
+' Importeert uitsluitend de koppelingen tussen processen en assets
+' (kolommen K en L van het Processes-blad), zonder de basisgegevens
+' opnieuw te laden. Handig na een handmatige correctie van procesnamen.
 Sub ImportKoppelingen()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -1547,7 +1921,11 @@ Sub ImportKoppelingen()
     MsgBox "Koppelingen ge" & Chr(239) & "mporteerd (kolom K: informateassets, kolom L: afhankelijke assets).", vbInformation, "GRC Import"
 End Sub
 
-' Importeer Afhankelijke assets uit Access-tabel "T - Dependent assets"
+' ── ImportAfhankelijkeAssets ─────────────────────────────────────────────────
+' Importeert afhankelijke assets uit "T - Dependent assets" naar het
+' "Dependent Assets"-blad. Verwerkt ook het Overarching-veld (Boolean →
+' ✔-vinkje in kolom F) en de C/I/A Security Objectives.
+' Na import: herlaad RARM-kolomkoppen en bijwerk kleuring.
 Sub ImportAfhankelijkeAssets()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -1629,8 +2007,11 @@ Sub ImportAfhankelijkeAssets()
     MsgBox destRow - 6 & " afhankelijke assets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
 End Sub
 
-' Importeer koppelingen kwetsbaarheden <-> afhankelijke assets (standalone knop)
-' Voer dit uit NA de import van kwetsbaarheden.
+' ── ImportLinksKwetsbaarheden ────────────────────────────────────────────────
+' Importeert de geselecteerde controls per DA (ImportGeselecteerdeControls)
+' en de kwetsbaarheden per DA in RARM rij 3 (ImportRARMKwetsbaarheden).
+' OPGELET: voer dit altijd UIT NA ImportKwetsbaarheden / ImportAlles,
+' want de kwetsbaarheden-sheet moet al gevuld zijn voor correcte koppeling.
 Sub ImportLinksKwetsbaarheden()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -1651,10 +2032,27 @@ Sub ImportLinksKwetsbaarheden()
     MsgBox "Links kwetsbaarheden / controls per afhankelijke asset ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
 End Sub
 
-' Importeert geselecteerde controls per DA vanuit LT - Selected controls to DA
-' en schrijft ChrW(10004) in de overeenkomstige RARM-datacellen.
-' Vertaalketen: ControlReference -> T-CyFunEssentiel.RefNr -> 2023-ID
-'              -> CyFun Controls sheet -> 2025-ID -> rijnummer in RARM
+' ── ImportGeselecteerdeControls ──────────────────────────────────────────────
+' Importeert de geselecteerde controls per afhankelijke asset (DA) vanuit de
+' koppelingstabel "LT - Selected controls to DA" en schrijft ✔-vinkjes in de
+' overeenkomstige RARM-datacellen.
+'
+' Vertaalketen (stap voor stap):
+'   ctrlRef  (LT.ControlReference = Long)
+'     → refNrMap(ctrlRef) = CyFun 2023 ID-string  (uit T - CyFunEssentiel.Requirement)
+'       bv. "IMPORTANT_RS.CO-3.2: The organization..."
+'     → NormId23() → id23  = genormaliseerde 2023-ID (bv. "rs.co-3.2")
+'     → rev23to25(id23) = id25  = 2025-ID (bv. "rs.co-3.2" als ongewijzigd,
+'                                  of nieuw 2025-ID als hernoemd)
+'     → ctrlRowMap(id25) = rijnummer in RARM
+'   ltDaId (LT.DAID = Long)
+'     → daIdColMap(ltDaId) = kolomnummer in RARM (via DA-naam in rij 2)
+'
+' Koppelingssleutel DA-naam ↔ RARM: T-Dependent assets.DAName (NIET .ID)
+' omdat RARM-kolommen op naam zijn aangemaakt (RefreshRARMKolommen).
+'
+' Afwijkingen (2023-controls zonder 2025-equivalent) worden weggeschreven naar
+' het blad "Controls 2023 - DA" voor rapportage aan de CISO.
 Sub ImportGeselecteerdeControls(conn As Object)
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_DATA As Long = 4
@@ -1879,15 +2277,21 @@ Sub ImportGeselecteerdeControls(conn As Object)
            vbInformation, "GRC Import"
 End Sub
 
-' Opent het UserForm VulnPicker voor kwetsbaarheid-selectie in RARM-sheet
+' ── TonenVulnPicker ──────────────────────────────────────────────────────────
+' Opent het VulnPicker-formulier voor de opgegeven DA-kolom in de RARM-sheet.
+' Slaat de kolomindex op in g_RARMCol zodat het formulier de juiste cel kan lezen/schrijven.
 Sub TonenVulnPicker(targetCol As Long)
     g_RARMCol = targetCol
     VulnPicker.Show
 End Sub
 
-' Verzamelt control IDs die een ✔ hebben voor minstens één van de opgegeven kwetsbaarheden.
-' selVulns: kommagescheiden string met kwetsbaarheidsnamen (uit RARM rij 3)
-' Retourneert een Scripting.Dictionary {lowercase ctrl_id → True}
+' ── GetMarkedCtrlIDs ──────────────────────────────────────────────────────────
+' Verzamelt alle Control IDs (kolom A) die een ✔ hebben voor minstens één
+' van de kwetsbaarheden in selVulns.
+' selVulns: kommagescheiden string "VulnNaam (kans), ..." (uit RARM rij 3).
+' De kans-suffix wordt gestript via InStrRev voor de match.
+' Retourneert een Scripting.Dictionary {lowercase ctrl_id → True} voor snelle
+' opzoekingen door KleurRARMKolom.
 Private Function GetMarkedCtrlIDs(wsK As Worksheet, selVulns As String) As Object
     Const KWETS_ROW_HDR    As Long = 2
     Const KWETS_ROW_DATA   As Long = 6
@@ -1930,9 +2334,19 @@ Private Function GetMarkedCtrlIDs(wsK As Worksheet, selVulns As String) As Objec
     Set GetMarkedCtrlIDs = result
 End Function
 
-' Importeert kwetsbaarheden + probabiliteit per DA vanuit Access naar RARM rij 3.
-' Leest SQL van "QLT2 - Vulnerabilities for DA - assigned" via ADOX, verwijdert de WHERE
-' clausule (bevat formulierparameters) en voert de gecleande SQL rechtstreeks uit.
+' ── ImportRARMKwetsbaarheden ─────────────────────────────────────────────────
+' Vult rij 3 van de RARM-sheet met de geselecteerde kwetsbaarheden (+ kans)
+' per afhankelijke asset.
+' Gebruikt een directe SQL-JOIN op de onderliggende tabellen in plaats van
+' de Access-query "QLT2 - Vulnerabilities for DA - assigned" (die formulier-
+' parameters bevat die niet via ADO kunnen worden meegegeven).
+'
+' Tabellen gebruikt:
+'   T - Dependent assets           : DAName
+'   LT - Vulnerabilities to Dependent Assets : DAID, VulnerabilityID, Probability
+'   T - Vulnerabilities            : ID, Vulnerability (naam)
+'
+' Resultaatformaat in RARM rij 3: "VulnNaam (kans), VulnNaam2 (kans), ..."
 Sub ImportRARMKwetsbaarheden(conn As Object)
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
@@ -2022,8 +2436,14 @@ Sub ImportRARMKwetsbaarheden(conn As Object)
     Loop
 End Sub
 
-' Herlaadt DA-kolomkoppen in RARM vanuit de Dependent Assets sheet.
-' Leest col 2 (naam) en col 6 (overarching) van rijen 6-105.
+' ── RefreshRARMKolommen ──────────────────────────────────────────────────────
+' Herlaadt de DA-kolomkoppen (rij 2) in de RARM-sheet op basis van het
+' Dependent Assets-blad (kolom B = naam, kolom F = overarching-vinkje).
+' Wist eerst het volledige DA-bereik (koppen + data + opmaak) om restanten
+' van verwijderde of herordende DA's te vermijden.
+' Overarching-DA's krijgen een oranje achtergrond (RGB 180,83,9);
+' gewone DA's krijgen gele achtergrond (RGB 254,249,195).
+' Rij 1 (titel-merge) wordt na afloop uitgebreid tot het nieuwe kolombereik.
 Sub RefreshRARMKolommen()
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
@@ -2105,7 +2525,9 @@ Sub RefreshRARMKolommen()
     wsR.Range(wsR.Cells(1, 1), wsR.Cells(1, titleLast)).Merge
 End Sub
 
-' Kleurt alle DA-kolommen in RARM door KleurRARMKolom aan te roepen per kolom.
+' ── KleurAlleRARMKolommen ────────────────────────────────────────────────────
+' Itereert over alle DA-kolommen (rij 2, kolom 5+) en roept per kolom
+' KleurRARMKolom aan. Stopt bij de eerste lege kolomkop (einde DA-zone).
 Sub KleurAlleRARMKolommen()
     Const RARM_ROW_DA As Long = 2
     Const RARM_COL_DA As Long = 5
@@ -2122,10 +2544,18 @@ Sub KleurAlleRARMKolommen()
     Loop
 End Sub
 
-' Synchroniseert RARM DA-kolommen met de Dependent Assets-sheet.
-' Bewaart rij-3-waarden (kwetsbaarheden) en vinkjes voor DA's die nog bestaan.
-' Kolommen van weggevallen DA's worden verwijderd; nieuwe DA's krijgen een lege kolom.
-' Roep KleurAlleRARMKolommen aan na afloop voor correcte kleuring.
+' ── SyncRARMKolommen ─────────────────────────────────────────────────────────
+' Synchroniseert de DA-kolommen van de RARM-sheet met de huidige staat van
+' het Dependent Assets-blad. Bewaart rij-3-waarden (kwetsbaarheden) en
+' ✔-vinkjes voor DA's die nog bestaan; verwijdert kolommen voor weggevallen DA's.
+' Herbouwt de kolommen in de volgorde van het Dependent Assets-blad.
+' Roep na afloop KleurAlleRARMKolommen aan voor correcte kleuring.
+'
+' Werkwijze:
+'   1. Snapshot: sla rij-3-waarden en vinkjes op per DA-naam (Dictionary)
+'   2. Wis de volledige DA-zone (koppen + data + opmaak)
+'   3. Herbouw kolommen in DA-sheet-volgorde; herstel opgeslagen data
+'   4. Vernieuw titel-merge (rij 1) tot het nieuwe kolombereik
 Sub SyncRARMKolommen()
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
@@ -2251,10 +2681,19 @@ Sub SyncRARMKolommen()
     wsR.Range(wsR.Cells(1, 1), wsR.Cells(1, titleLast)).Merge
 End Sub
 
-' Kleurt één DA-kolom in RARM:
-'   - Volledige oranje (RGB 255,192,0) voor controls gelinkt aan eigen geselecteerde kwetsbaarheden.
-'   - Lichtgele spill (RGB 255,230,153) voor controls van overarching DA-kolommen,
-'     maar alleen als de targetCol zelf NIET overarching is.
+' ── KleurRARMKolom ───────────────────────────────────────────────────────────
+' Kleurt de datacellen (rij 4+) van één DA-kolom in de RARM-matrix:
+'
+'   1. Reset: wisselende grijs/wit achtergrond (streepjespatroon)
+'   2. Eigen kwetsbaarheden: controls die een ✔ hebben voor minstens één
+'      van de kwetsbaarheden in rij 3 van targetCol → oranje (RGB 255,192,0)
+'   3. Overarching spill (alleen als targetCol NIET overarching is):
+'      controls die ook aangevinkt zijn voor overarching DA's → lichtgeel
+'      (RGB 255,230,153). Dit toont welke controls van organisatorisch niveau
+'      ook van toepassing zijn op de huidige DA.
+'
+' Kleuren worden bepaald via GetMarkedCtrlIDs die de ✔-marks in het
+' Kwetsbaarheden-blad uitleest voor de opgegeven kwetsbaarheids-namen.
 Sub KleurRARMKolom(targetCol As Long)
     Const RARM_ROW_DA      As Long = 2
     Const RARM_ROW_VULN    As Long = 3
@@ -2355,17 +2794,23 @@ Sub KleurRARMKolom(targetCol As Long)
     End If
 End Sub
 
-' Opent het UserForm AssetPicker voor handmatige selectie van assets bij een proces
+' ── TonenAssetPicker ─────────────────────────────────────────────────────────
+' Initialiseer de globale toestandsvariabelen voor AssetPicker en open het
+' formulier. Geeft niets terug als de geselecteerde rij geen procesnaam bevat
+' (voorkomen van een lege popup voor lege rijen).
 Sub TonenAssetPicker(targetRow As Long, sourceSheet As String, targetCol As Long)
     g_TargetRow = targetRow
     g_ProcesNaam = CStr(ThisWorkbook.Sheets("Processes").Cells(targetRow, 2).Value)
     g_PickerSourceSheet = sourceSheet
     g_PickerTargetCol = targetCol
-    If g_ProcesNaam = "" Then Exit Sub
+    If g_ProcesNaam = "" Then Exit Sub   ' lege rij → geen popup
     AssetPicker.Show
 End Sub
 
-' Importeer Informatieassets uit Access-tabel "T - Information Assets"
+' ── ImportInformatieassets ───────────────────────────────────────────────────
+' Importeert informatieassets uit "T - Information Assets" naar het
+' "Information Assets"-blad. Slaat Naam, Omschrijving, Eigenaar, Dienst en
+' Confidentialiteit (col F) op. Opmerkingen (col H) worden niet overschreven.
 Sub ImportInformatieassets()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -2414,7 +2859,10 @@ Sub ImportInformatieassets()
     MsgBox destRow - 6 & " informatieassets ge" & Chr(239) & "mporteerd.", vbInformation, "GRC Import"
 End Sub
 
-' Exporteer alle gegevens naar een nieuw Excel-bestand
+' ── ExporteerAlles ────────────────────────────────────────────────────────────
+' Kopieert de bladen Processes, Information Assets, Dependent Assets en
+' Responsible Persons naar een nieuw .xlsx-bestand. Verwijdert het standaard
+' lege werkblad (Sheet1/Blad1/Feuil1) uit het exportbestand.
 Sub ExporteerAlles()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogSaveAs)
@@ -2457,9 +2905,38 @@ Sub ExporteerAlles()
     MsgBox "Export opgeslagen:" & vbCrLf & exportPath, vbInformation, "GRC Export"
 End Sub
 
-' Refresh Kwetsbaarheden-matrix vanuit Access.
-' FASE 1: kwetsbaarheid-namen + CIA-impact bijwerken op bestaande kolompositie.
-' FASE 2: voor elke kwetsbaarheid-kolom alle remediërende controls opzoeken en markeren.
+' ── CoreImportKwetsbaarheden ─────────────────────────────────────────────────
+' Kernroutine voor het importeren van de kwetsbaarheden-matrix.
+' Wordt aangeroepen vanuit ImportAlles (workflow) en ImportKwetsbaarheden
+' (standalone knop).
+'
+' ══ FASE 1 — Kwetsbaarheden en CIA-impact bijwerken ══════════════════════════
+' Doel: synchroniseer de kwetsbaarheid-kolommen (rij 2+, kolom C+) van het
+'       Kwetsbaarheden-blad met de actuele inhoud van "T - Vulnerabilities".
+'
+'   Stap 1 : Bouw ctrlRowMap: LCase(2025-ID) → rijnummer in Kwetsbaarheden-blad
+'   Stap 2 : Bouw rev23to25 + enkel23Set via CyFun Controls-sheet (kolom F=2025, M=2023)
+'   Stap 3 : Bouw refNrMap: RefNr (Long) → CyFun 2023 ID-string via T-CyFunEssentiel
+'   Stap 4 : Scan bestaande kwetsbaarheid-kolommen → existingVulnCols map
+'   Stap 5 : Laad kwetsbaarheden uit T-Vulnerabilities; werk bestaande kolom
+'            bij of voeg nieuwe kolom toe; sla vinkjes (fase 2) leeg
+'   Stap 6 : Verwijder orphan-kolommen (in blad maar niet meer in database)
+'   Stap 7 : Pas titelrij-merge aan tot het nieuwe kolombereik
+'
+' ══ FASE 2 — Controls markeren per kwetsbaarheid ════════════════════════════
+' Doel: vul ✔-vinkjes in de matrix op basis van de koppelingstabel
+'       "LT -  Vulnerability to control - fixed".
+'
+' Vertaalketen per koppeling (vulnID → ctrlRow):
+'   ltCRef  = LT.CyFunControl  (Long = RefNr uit T-CyFunEssentiel)
+'     → refNrMap(ltCRef)  = CyFun 2023 ID-string
+'     → NormId23()        → id23  = genormaliseerde 2023-ID (bv. "rs.co-3.2")
+'     → rev23to25(id23)   → id25  = genormaliseerde 2025-ID (of id23 als ongewijzigd)
+'     → ctrlRowMap(id25)  → rijnummer in Kwetsbaarheden-blad
+'   vinkje wordt gezet in ws.Cells(ctrlRow, vulnCols(v))
+'
+' Niet-gematchte 2023-controls (ontbreken in 2025 ESSENTIAL) worden
+' gerapporteerd in het blad "Afwijkingen".
 Private Sub CoreImportKwetsbaarheden(conn As Object)
     Const COL_ID      As Integer = 1
     Const COL_TITLE   As Integer = 2
@@ -2856,7 +3333,9 @@ Private Sub CoreImportKwetsbaarheden(conn As Object)
            afwList.Count & " afwijkingen.", vbInformation, "GRC Import"
 End Sub
 
-' Importeer kwetsbaarheden standalone (knop op Kwetsbaarheden-sheet)
+' ── ImportKwetsbaarheden ─────────────────────────────────────────────────────
+' Standalone wrapper die de gebruiker vraagt een Access-database te kiezen
+' en vervolgens CoreImportKwetsbaarheden aanroept.
 Sub ImportKwetsbaarheden()
     Dim fd As FileDialog
     Set fd = Application.FileDialog(msoFileDialogFilePicker)
@@ -2873,12 +3352,24 @@ Sub ImportKwetsbaarheden()
     Application.ScreenUpdating = True
 End Sub
 
-' Normaliseert elke CyFun 2023 ID-string naar lowercase kort ID, ongeacht het formaat:
+' ── NormId23 ─────────────────────────────────────────────────────────────────
+' Normaliseert een CyFun 2023 ID-string naar een kort, lowercase, canoniek ID.
+' Dit is nodig omdat de database CyFun 2023 IDs opslaat in uiteenlopende formaten
+' afhankelijk van het assurance-niveau en de bron.
+'
+' Voorbeelden:
 '   "IMPORTANT_RS.CO-3.2: The organization..." → "rs.co-3.2"
 '   "RS.CO-3.2: The organization..."           → "rs.co-3.2"
-'   "RS.CO-3.2.a"                              → "rs.co-3.2"
-'   "rs.co-3-2"                                → "rs.co-3.2"
+'   "RS.CO-3.2.a"                              → "rs.co-3.2"  (sub-letter gestript)
+'   "rs.co-3-2"                                → "rs.co-3.2"  (koppelteken → punt)
 '   "RS.CO-3.2"                                → "rs.co-3.2"
+'
+' Stap 1 : strip niveau-prefix (IMPORTANT_, BASIC_, ESSENTIAL_)
+' Stap 2 : strip beschrijvingstekst na dubbele punt ("ID: tekst" → "ID")
+' Stap 3 : lowercase
+' Stap 4 : strip trailing letter-extensie (.a t/m .z voor sub-controls)
+' Stap 5 : converteer trailing -N → .N  (bv. "rs.co-3-2" → "rs.co-3.2")
+'          zodat de ID consistent is met de 2025-notatie
 Function NormId23(s As String) As String
     Dim r As String
     r = Trim(s)
@@ -2944,15 +3435,20 @@ wb = Workbook()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _Lang  (verborgen vertaalblad + benoemde bereiken)
+# Bevat in kolommen A-D alle vertalingssleutels + NL/FR/EN-teksten (rijen 2+).
+# Kolommen F-H (rijen 250+) bevatten de dropdown-lijsten CLS/ROLES/ASSET_TYPES.
+# Het blad wordt verborgen zodat eindgebruikers het niet per ongeluk aanpassen.
 # ─────────────────────────────────────────────────────────────────────────────
 ws_lang = wb.active
 ws_lang.title = "_Lang"
 
+# Kolomkoppen voor de vertalingstabel
 for col, h in enumerate(["Sleutel", "NL", "FR", "EN"], 1):
     c = ws_lang.cell(row=1, column=col, value=h)
     c.font = Font(name="Calibri", bold=True, color=C["navy"])
     c.fill = PatternFill("solid", fgColor=C["grey_mid"])
 
+# Alle TRANSLATIONS tuples wegschrijven (sleutel + NL + FR + EN)
 for r, row_data in enumerate(TRANSLATIONS, 2):
     for col, val in enumerate(row_data, 1):
         ws_lang.cell(row=r, column=col, value=val)
@@ -2962,12 +3458,14 @@ for letter in ["B", "C", "D"]:
     ws_lang.column_dimensions[letter].width = 72
 
 # Classificatiewaarden F=NL, G=FR, H=EN  — 5 niveaus
-CLS_START   = 250
-ROLES_START = 258
-TYPES_START = 270
+# Startrijnen zijn bewust ver van rij 1 geplaatst (250+) om conflicten
+# met de vertalingstabel te vermijden zonder een apart blad te hoeven aanmaken.
+CLS_START   = 250   # rijen 250-254: classificatieniveau-labels
+ROLES_START = 258   # rijen 258-265: GRC-rollen (8 waarden)
+TYPES_START = 270   # rijen 270-279: asset-types (10 waarden)
 
 for col_off, lang in enumerate(["NL", "FR", "EN"]):
-    col = 6 + col_off
+    col = 6 + col_off   # kolom F (NL), G (FR), H (EN)
     for row_off, val in enumerate(CLS[lang]):
         ws_lang.cell(row=CLS_START + row_off, column=col, value=val)
     for row_off, val in enumerate(ROLES[lang]):
@@ -2977,10 +3475,13 @@ for col_off, lang in enumerate(["NL", "FR", "EN"]):
 
 ws_lang.sheet_state = "hidden"
 
-# Named ranges
-n_cls   = len(CLS["NL"])    # 5
-n_roles = len(ROLES["NL"])  # 8
-n_types = len(ASSET_TYPES["NL"])  # 10
+# Benoemde bereiken: cls_NL, cls_FR, cls_EN, roles_NL, roles_FR, roles_EN,
+# types_NL, types_FR, types_EN.
+# Dropdowns in de gegevensbladen gebruiken =INDIRECT("cls_"&Config!$D$9)
+# zodat ze automatisch wisselen bij taalwijziging.
+n_cls   = len(CLS["NL"])          # 5 classificatieniveaus
+n_roles = len(ROLES["NL"])        # 8 rollen
+n_types = len(ASSET_TYPES["NL"])  # 10 asset-types
 
 for col_off, lang in enumerate(["NL", "FR", "EN"]):
     col = 6 + col_off
@@ -2991,6 +3492,18 @@ for col_off, lang in enumerate(["NL", "FR", "EN"]):
 
 # ── Layout-hulpfuncties ───────────────────────────────────────────────────────
 def sheet_title_bar(ws, text, n_cols):
+    """
+    Plaatst een tweeregelige titelbalk bovenaan een werkblad.
+    Rij 1 : grote marineblauwe balk met de hoofdtitel (tekst of t()-formule).
+    Rij 2 : kleinere blauwe balk met de tagline 'Governance · Risico · Compliance'
+             (via t("app_tagline"), taalvolgend).
+
+    Parameters
+    ----------
+    ws     : openpyxl.Worksheet
+    text   : str — celwaarde of formule voor de hoofdtitel
+    n_cols : int — aantal kolommen dat de balk overspant
+    """
     last = get_column_letter(n_cols)
     ws.merge_cells(f"A1:{last}1");  ws.row_dimensions[1].height = 52
     c = ws["A1"]; c.value = text
@@ -3002,6 +3515,18 @@ def sheet_title_bar(ws, text, n_cols):
     c.alignment = align("center", "center")
 
 def section_header(ws, row, key, n_cols, col_start=1):
+    """
+    Plaatst een donkerblauwe sectiekop (gemerged over n_cols kolommen).
+    Wordt gebruikt voor blokken zoals 'ALGEMENE INSTELLINGEN' of 'IMPORTEREN'.
+
+    Parameters
+    ----------
+    ws        : openpyxl.Worksheet
+    row       : int — rijnummer
+    key       : str — vertaalsleutel (t()-formule)
+    n_cols    : int — breedte in kolommen
+    col_start : int — startkolom (standaard 1 = A)
+    """
     ws.row_dimensions[row].height = 20
     lc = get_column_letter(col_start + n_cols - 1)
     ws.merge_cells(f"{get_column_letter(col_start)}{row}:{lc}{row}")
@@ -3011,6 +3536,30 @@ def section_header(ws, row, key, n_cols, col_start=1):
 
 def label_value_row(ws, row, col_lbl, col_val, label, value,
                     val_bold=False, val_color="text", val_size=10, dropdown=None, editable=True):
+    """
+    Plaatst een label-waarde paar op één rij: grijs label links, invoercel rechts.
+    Editeerbare cellen krijgen een witte achtergrond + blauwe rand;
+    niet-editeerbare cellen (metadata) krijgen grijs + grijze rand.
+    Optioneel kan een dropdown-validatie worden meegegeven.
+
+    Parameters
+    ----------
+    ws        : openpyxl.Worksheet
+    row       : int — rijnummer
+    col_lbl   : int — kolomindex van de labelcel
+    col_val   : int — kolomindex van de waarde-/invoercel
+    label     : str — labeltekst (wordt niet via t() vertaald — al een formule of vaste tekst)
+    value     : str — beginwaarde van de invoercel
+    val_bold  : bool — vetgedrukt voor de waarde
+    val_color : str — kleursleutel voor de waarde
+    val_size  : int — lettergrootte voor de waarde
+    dropdown  : str | None — Excel-formule voor dropdownvalidatie (bv. '"NL,FR,EN"')
+    editable  : bool — True = witte cel met blauwe rand, False = grijs (read-only)
+
+    Geeft terug
+    -----------
+    openpyxl.Cell — de waarde-/invoercel (voor verdere stijlinstelling)
+    """
     ws.row_dimensions[row].height = 26
     lc = ws.cell(row=row, column=col_lbl, value=label)
     lc.font = font(10, bold=True, color="grey_dark"); lc.alignment = align("right", "center")
@@ -3027,6 +3576,18 @@ def label_value_row(ws, row, col_lbl, col_val, label, value,
     return vc
 
 def hint_row(ws, row, n_cols, key, col_start=1):
+    """
+    Plaatst een cursieve hinttekst (grijs, klein) over n_cols kolommen.
+    Wordt gebruikt voor aanwijzingen onder invoervelden (bv. taalwisseltip).
+
+    Parameters
+    ----------
+    ws        : openpyxl.Worksheet
+    row       : int — rijnummer
+    n_cols    : int — breedte in kolommen
+    key       : str — vertaalsleutel (t()-formule)
+    col_start : int — startkolom (standaard 1 = A)
+    """
     ws.row_dimensions[row].height = 18
     lc = get_column_letter(col_start + n_cols - 1)
     ws.merge_cells(f"{get_column_letter(col_start)}{row}:{lc}{row}")
@@ -3057,11 +3618,27 @@ def build_cls_sheet(ws, title_key, subtitle_key, id_prefix,
                     col_headers_before, col_headers_after,
                     widths, data_start=6, data_end=105):
     """
-    Bouwt een gegevensblad met classificatiekolommen (code + label).
-    col_headers_before : list of (key, col_idx)  — kolommen voor de classificaties
-    col_headers_after  : list of (key, col_idx)  — kolommen na de classificaties
-    widths             : list of column widths
-    Returns: (HDR_ROW, DATA_START, DATA_END, CLS_PAIRS, N)
+    Bouwt de basisstructuur van een classificatiegegevensblad (titelbalk,
+    subtitelrij, kolomkoppen). Verwerkt de enkelvoudige kolomkoppen vóór en
+    na de classificatiekolommen; de classificatiekolom-paren worden nadien
+    afzonderlijk toegevoegd via add_cls_pairs().
+
+    Parameters
+    ----------
+    ws                 : openpyxl.Worksheet
+    title_key          : str — vertaalsleutel voor de paginatitel (rij 1)
+    subtitle_key       : str — vertaalsleutel voor de ondertitel (rij 3)
+    id_prefix          : str — voorvoegsel voor automatische ID-formule ("P", "A", "D")
+    col_headers_before : list[(key, col_idx)] — kolomkoppen vóór de classificaties
+    col_headers_after  : list[(key, col_idx)] — kolomkoppen na de classificaties
+    widths             : list[float] — kolombreedtes (kolom 1 t/m N)
+    data_start         : int — eerste datarij (standaard 6)
+    data_end           : int — laatste datarij (standaard 105 = max. 100 records)
+
+    Geeft terug
+    -----------
+    tuple (HDR_ROW, data_start, data_end, N) — benodigd door add_cls_pairs()
+    en de data-rijlus in de aanroepende code
     """
     N = len(widths)
     set_col_widths(ws, widths)
@@ -3087,7 +3664,26 @@ def build_cls_sheet(ws, title_key, subtitle_key, id_prefix,
 
 # ── Gepaarde classificatiekolommen ───────────────────────────────────────────
 def add_cls_pairs(ws, cls_pairs, HDR_ROW, DATA_START, DATA_END, max_level=5):
-    """Voegt merged koppen, formules, dropdowns en CF toe voor de classificatiekolommen."""
+    """
+    Voegt voor elke classificatie-paar (code-kolom + label-kolom) het volgende toe:
+      - Gemerged kolomkop in HDR_ROW (marineblauwe achtergrond)
+      - Per datarij: code-cel (dropdown 1-5) + label-cel (=INDEX-formule op Reference Values)
+      - DataValidation: dropdown beperkt tot 1..max_level (standaard 5)
+      - Voorwaardelijke opmaak (CF): 5 kleurrings op basis van code-celwaarde
+
+    De label-cel bevat een formule die het niveau-label ophaalt uit het
+    'Reference Values'-blad (B8:B12) zodat de tekst automatisch meebeweegt
+    als de gebruiker de taal wijzigt (niet via t(), maar via directe celverwijzing).
+
+    Parameters
+    ----------
+    ws        : openpyxl.Worksheet
+    cls_pairs : list[(key, code_col, label_col)] — tripels per classificatiedimensie
+    HDR_ROW   : int — rijnummer van de kolomkop
+    DATA_START: int — eerste datarij
+    DATA_END  : int — laatste datarij
+    max_level : int — maximum classificatieniveau (standaard 5; gebruik 4 voor niet-Classified)
+    """
     for key, code_col, label_col in cls_pairs:
         cl = get_column_letter(code_col); ll = get_column_letter(label_col)
         ws.merge_cells(f"{cl}{HDR_ROW}:{ll}{HDR_ROW}")
@@ -3103,6 +3699,10 @@ def add_cls_pairs(ws, cls_pairs, HDR_ROW, DATA_START, DATA_END, max_level=5):
             cc.alignment = align("center", "center")
             cc.font = Font(name="Calibri", bold=True, size=11, color=C["subtext"])
             lc = ws.cell(row=r, column=label_col)
+            # Label-formule: haalt niveau-naam op uit 'Reference Values'!B8:B12
+            # (rij 8 = niveau 1 / Laag, rij 12 = niveau 5 / Classified).
+            # IFERROR valt terug op "?" bij ongeldige invoer.
+            # De cel is grijs en niet editeerbaar — VBA-imports schrijven hier nooit naar.
             lc.value = (
                 f'=IF({cl}{r}="","",IFERROR('
                 f'INDEX(\'Reference Values\'!$B$8:$B$12,{cl}{r}),"?"))'
@@ -3111,7 +3711,8 @@ def add_cls_pairs(ws, cls_pairs, HDR_ROW, DATA_START, DATA_END, max_level=5):
             lc.font = Font(name="Calibri", size=10, italic=True)
             lc.fill = fill("grey_light")
 
-    # Dropdown beperkt tot max_level
+    # Dropdown beperkt tot max_level: genereert bv. "1,2,3,4,5" als formula1-waarde.
+    # showDropDown=False = dropdown-pijltje altijd zichtbaar (counter-intuitieve Excel API).
     levels_str = ",".join(str(i) for i in range(1, max_level + 1))
     dv = DataValidation(type="list", formula1=f'"{levels_str}"', showDropDown=False, allow_blank=True)
     dv.sqref = " ".join(
@@ -3143,6 +3744,11 @@ def add_cls_pairs(ws, cls_pairs, HDR_ROW, DATA_START, DATA_END, max_level=5):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHEET: Config
+# Bevat de instellingen die alle andere bladen beïnvloeden:
+#   - Organisatienaam (D5) en dienst/entiteit (D6)
+#   - Taalinstelling (D9): NL / FR / EN — LANG_CELL verwijst hier naartoe
+#   - Versie-metadata (read-only): versie, laatste update, gebruiker
+# Kolom D is de invoerkolom; kolom B bevat de labels.
 # ══════════════════════════════════════════════════════════════════════════════
 ws_cfg = wb.create_sheet("Config")
 no_gridlines(ws_cfg); set_col_widths(ws_cfg, [2, 32, 3, 30, 3, 26, 26])
@@ -3168,18 +3774,41 @@ label_value_row(ws_cfg, 15, 2, 4, t("cfg_updated_label"),    NOW_STR, editable=F
 label_value_row(ws_cfg, 16, 2, 4, t("cfg_updated_by_label"), USERNAME)
 ws_cfg.row_dimensions[17].height = 8
 
-# Tips
-ws_cfg.row_dimensions[18].height = 20; ws_cfg.merge_cells("B18:F18")
-c = ws_cfg.cell(row=18, column=2, value=t("ui_tips"))
+# ── Assurance niveau entiteit (rijen 18–21) ───────────────────────────────────
+# Config!D19 bevat het gekozen assurance niveau (Basic / Important / Essential).
+# De Streamlit-app leest deze cel om te bepalen welke maatregelen getoond worden.
+ws_cfg.row_dimensions[18].height = 20
+ws_cfg.merge_cells("B18:F18")
+c = ws_cfg.cell(row=18, column=2, value="Assurance niveau entiteit")
+c.fill = fill("navy"); c.font = Font(name="Calibri", bold=True, size=9, color=C["blue_light"])
+c.alignment = align("left", "center", indent=1)
+
+label_value_row(ws_cfg, 19, 2, 4, "Assurance niveau", "",
+                val_bold=True, val_color="blue_mid", val_size=12,
+                dropdown='"Basic,Important,Essential"')
+
+ws_cfg.row_dimensions[20].height = 18
+ws_cfg.merge_cells("B20:F20")
+c = ws_cfg.cell(row=20, column=2,
+    value="Kies het assurance niveau dat de entiteit wenst te behalen. "
+          "Dit bepaalt welke maatregelen in het risicobeheerplan getoond worden.")
+c.font = Font(name="Calibri", size=9, color=C["subtext"], italic=True)
+c.alignment = align("left", "center", indent=1)
+
+ws_cfg.row_dimensions[21].height = 8
+
+# Tips (verschoven van rijen 18–20 naar rijen 22–24)
+ws_cfg.row_dimensions[22].height = 20; ws_cfg.merge_cells("B22:F22")
+c = ws_cfg.cell(row=22, column=2, value=t("ui_tips"))
 c.fill = fill("accent_light"); c.font = Font(name="Calibri", bold=True, size=9, color=C["accent"])
 c.alignment = align("left", "center", indent=1)
-for tip_r, tip_k in [(19, "cfg_save_hint"), (20, "cfg_lang_change_hint")]:
+for tip_r, tip_k in [(23, "cfg_save_hint"), (24, "cfg_lang_change_hint")]:
     ws_cfg.row_dimensions[tip_r].height = 20; ws_cfg.merge_cells(f"B{tip_r}:F{tip_r}")
     c = ws_cfg.cell(row=tip_r, column=2, value=t(tip_k))
     c.fill = fill("accent_light"); c.font = Font(name="Calibri", size=9, color=C["grey_dark"])
     c.alignment = align("left", "center", indent=1)
 
-quicklinks_block(ws_cfg, 21,
+quicklinks_block(ws_cfg, 25,
     [("ui_goto_info",    "Info!A1"),
      ("ui_goto_proc",   "Processes!A1"),
      ("ui_goto_assets", "Information Assets!A1"),
@@ -3235,10 +3864,20 @@ quicklinks_block(ws_info, 26,
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHEET: Processen
+# Kolomindeling (12 kolommen):
+#   A(1) = ID (formule P001-P100)    B(2)  = Naam
+#   C(3) = Omschrijving              D(4)  = Eigenaar
+#   E(5) = Dienst                    F(6)  = Integriteit (code 1-5)
+#   G(7) = Integriteit (label)       H(8)  = Beschikbaarheid (code 1-5)
+#   I(9) = Beschikbaarheid (label)   J(10) = Opmerkingen
+#   K(11)= Informatieassets (VBA)    L(12) = Afhankelijke assets (VBA)
+# Kolom K en L worden ingevuld via de AssetPicker-popup (PROC_SHEET_CODE).
 # ══════════════════════════════════════════════════════════════════════════════
 ws_proc = wb.create_sheet("Processes")
 
 PROC_WIDTHS = [5, 20, 36, 18, 16,  4, 15,  4, 15,  26,  35,  35]
+# cls_pairs: (vertaalsleutel, code-kolom, label-kolom)
+# Processen hebben I en A (geen C — vertrouwelijkheid zit op informatieasset-niveau)
 PROC_CLS_PAIRS = [
     ("proc_col_integriteit",  6,  7),
     ("proc_col_beschikbaar",  8,  9),
@@ -3259,6 +3898,8 @@ for r in range(DS_PROC, DE_PROC + 1):
         c.fill = fill(alt); c.font = font(10, color="text")
         c.alignment = align("left", "center", wrap=True); c.border = border_all()
     id_c = ws_proc.cell(row=r, column=1)
+    # ID-formule: toont "P001" t/m "P100" als kolom B niet leeg is.
+    # TEXT(...,"P000") formatteert het volgnummer als 3-cijferig met voorloopnullen.
     id_c.value = f'=IF(B{r}="","",TEXT({r - DS_PROC + 1},"P000"))'
     id_c.font = Font(name="Calibri", size=9, bold=True, color=C["subtext"])
     id_c.alignment = align("center", "center")
@@ -3270,12 +3911,20 @@ ws_proc.auto_filter.ref = f"A{HDR_PROC}:{get_column_letter(N_PROC)}{HDR_PROC}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHEET: Informatieassets
+# Kolomindeling (9 kolommen):
+#   A(1) = ID (formule A001-A100)    B(2)  = Naam
+#   C(3) = Omschrijving              D(4)  = Eigenaar
+#   E(5) = Dienst                    F(6)  = Confidentialiteit (code 1-5)
+#   G(7) = Confidentialiteit (label) H(8)  = Opmerkingen
+#   I(9) = Gebruikt in processen (VBA, read-only grijs)
+# Informatieassets dragen alleen C-classificatie (niet I/A — die zit op procesniveau).
+# Kolom I wordt berekend door INFO_ASSET_SHEET_CODE (Worksheet_Activate).
 # ══════════════════════════════════════════════════════════════════════════════
 ws_asset = wb.create_sheet("Information Assets")
 
 ASSET_WIDTHS = [5, 20, 30, 16, 16,  4, 15,  24,  35]
 ASSET_CLS_PAIRS = [
-    ("asset_col_conf",  6,  7),
+    ("asset_col_conf",  6,  7),  # alleen Confidentialiteit voor informatieassets
 ]
 HDR_ASSET, DS_ASSET, DE_ASSET, N_ASSET = build_cls_sheet(
     ws_asset, "asset_title", "asset_subtitle", "A",
@@ -3300,7 +3949,8 @@ for r in range(DS_ASSET, DE_ASSET + 1):
     id_c.alignment = align("center", "center")
 
 add_cls_pairs(ws_asset, ASSET_CLS_PAIRS, HDR_ASSET, DS_ASSET, DE_ASSET)
-# Col 9 = computed door VBA (Worksheet_Activate) — markeer als read-only/grijs
+# Kolom I (9) = "Gebruikt in processen" — wordt berekend door VBA bij activering.
+# Grijs + cursief signaleert aan de gebruiker dat de cel read-only is.
 for r in range(DS_ASSET, DE_ASSET + 1):
     c9 = ws_asset.cell(row=r, column=9)
     c9.fill = fill("grey_light")
@@ -3312,11 +3962,21 @@ ws_asset.auto_filter.ref = f"A{HDR_ASSET}:{get_column_letter(N_ASSET)}{HDR_ASSET
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHEET: Afhankelijke assets
+# 25 kolommen, gegroepeerd in 5 zones:
+#   A-I   (1-9) : basisgegevens (ID, Naam, Beschrijving, Eigenaar, Dienst,
+#                  Overarching, Opmerkingen, Processen*, Info-assets*)
+#   J-O (10-15) : Security Requirements (VBA-berekend, read-only):
+#                  C-req(10+11), I-req(12+13), A-req(14+15)
+#   P-U (16-21) : Security Objectives (editeerbaar door gebruiker):
+#                  C-obj(16+17), I-obj(18+19), A-obj(20+21)
+#   V-X (22-24) : Gap Analyse (VBA-berekend): C-gap, I-gap, A-gap
+#   Y   (25)    : Commentaar (vrij tekstveld)
+# * Kolommen H(8) en I(9) = VBA-berekend (DEP_ASSET_SHEET_CODE)
+# Col F (6) = Overarching: niet-leeg (✔) = deze DA is van toepassing op alle processen.
 # ══════════════════════════════════════════════════════════════════════════════
 ws_dep = wb.create_sheet("Dependent Assets")
 
-# 25 kolommen: 1-9 basis + 10-15 Security Requirements + 16-21 Security Objectives + 22-24 Gap Analyse + 25 Commentaar
-# Col 6 = Overarching (nieuw): boolean — niet-leeg betekent dat dit een organisatorische asset is.
+# Kolombreedtes voor alle 25 kolommen
 DEP_WIDTHS = [5, 20, 30, 16, 16, 10, 24, 35, 35, 4, 15, 4, 15, 4, 15, 4, 15, 4, 15, 4, 15, 35, 35, 35, 35]
 DEP_CLS_PAIRS = [
     ("dep_col_conf",  10, 11),
@@ -3332,7 +3992,11 @@ HDR_DEP, DS_DEP, DE_DEP, N_DEP = build_cls_sheet(
     col_headers_after=[],
     widths=DEP_WIDTHS)
 
-# ── Groepskoppen rij 4: Security Requirements (paars) + Security Objectives (navy)
+# ── Groepskoppen rij 4: kleurgecodeerde zone-aanduiding ─────────────────────
+# Rij 4 staat boven de kolomkoppen (rij 5) en geeft per zone aan wat de functie is.
+# Paars = Security Requirements (VBA-berekend, niet editeerbaar)
+# Navy  = Security Objectives (editeerbaar door gebruiker)
+# Rood  = Gap Analyse (VBA-berekend)
 ws_dep.row_dimensions[4].height = 22
 ws_dep.merge_cells("J4:O4")
 c = ws_dep.cell(row=4, column=10, value=t("dep_sec_req_header"))
@@ -3430,9 +4094,13 @@ for r in range(DS_DEP, DE_DEP + 1):
     c = ws_dep.cell(row=r, column=25)
     c.alignment = align("left", "top", wrap=True)
 
-# Celbeveiliging: standaard alles vergrendeld; ontgrendel alleen editeerbare kolommen
-# Editeerbaar: B-G (2-7) = basisgegevens incl. Overarching + Opmerkingen, P-U (16-21) = objectives, Y (25) = commentaar
-# Gap-kolommen V-X (22-24) zijn vergrendeld (VBA-berekend)
+# Celbeveiliging: het blad is beveiligd (ws_dep.protection.sheet = True).
+# Standaard zijn alle cellen vergrendeld; editeerbare cellen krijgen
+# Protection(locked=False) zodat de gebruiker ze wél kan aanpassen.
+# Editeerbaar: B-G (2-7) = basisgegevens incl. Overarching + Opmerkingen
+#              P-U (16-21) = Security Objectives (door gebruiker in te vullen)
+#              Y (25)      = vrij commentaarveld
+# Vergrendeld (VBA-berekend of read-only): H-I (8-9) koppelingen, J-O (10-15) requirements, V-X (22-24) gap
 EDITABLE_COLS = list(range(2, 8)) + list(range(16, 22)) + [25]
 for r in range(DS_DEP, DE_DEP + 1):
     for col_idx in EDITABLE_COLS:
@@ -3448,9 +4116,22 @@ ws_dep.auto_filter.ref = f"A{HDR_DEP}:{get_column_letter(N_DEP)}{HDR_DEP}"
 
 def build_rarm(ws):
     """
-    RARM — Risk Assessment & Remediation Matrix.
-    Kolommen: A=Control ID  B=Richtlijn  C=Assurance  D=Sleutelmaatregel  E+=per Dependent Asset (dynamisch via macro)
-    Rijen:    1=Titel  2=DA-namen  3=Kwetsbaarheden-selector  4+=CyFun 2025 controls
+    Bouwt de statische structuur van de RARM-sheet (Risk Assessment & Remediation Matrix).
+
+    Opbouw:
+      Rij 1  : Titelbalk (gemerged over alle kolommen)
+      Rij 2  : Kolomkoppen — A=Control ID, B=Richtlijn, C=Assurance, D=Sleutelmaatregel,
+               E+ = placeholder DA-kolommen (worden overschreven door RefreshRARMKolommen)
+      Rij 3  : Kwetsbaarheden-rij — klikken op een DA-kolom opent VulnPicker
+      Rij 4+ : CyFun 2025 ESSENTIAL controls (uit CYFUN_SRC, tabs GOVERN t/m RECOVER)
+
+    De DA-kolommen (E+) zijn dynamisch: RefreshRARMKolommen vult ze in op basis van
+    het Dependent Assets-blad. De matrix wordt opgebouwd met N_TEMPLATE=10 lege
+    placeholder-kolommen die na VBA-injectie worden overschreven.
+
+    Parameters
+    ----------
+    ws : openpyxl.Worksheet — het RARM-werkblad
     """
     ROW_DA       = 2
     ROW_VULN     = 3
@@ -3475,6 +4156,15 @@ def build_rarm(ws):
     for k in range(N_TEMPLATE):
         ws.column_dimensions[get_column_letter(COL_DA_START + k)].width = 22
 
+    # ── Controls laden uit CYFUN_SRC ──────────────────────────────────────────
+    # Kolom-indeling in de CyFun 2025 ESSENTIAL bron (rij 3+):
+    #   row[0] = Category (GOVERN / IDENTIFY / …)
+    #   row[1] = Controls linked to management aspects
+    #   row[2] = Key Measure (niet leeg → is_km = True)
+    #   row[3] = Subcategory
+    #   row[4] = Assurance level (Basic / Important / Essential)
+    #   row[5] = Requirement text: "ID.AM-03: De organisatie inventariseert..."
+    # req_text.split(":", 1) scheidt het ID van de beschrijving.
     controls = []
     if CYFUN_SRC.exists():
         src_wb = load_workbook(str(CYFUN_SRC), read_only=True, data_only=True)
@@ -3622,7 +4312,27 @@ c.alignment = align("center", "center")
 ws_ie.row_dimensions[4].height = 10
 
 def ie_action_block(ws, row, btn_key, desc_key, btn_color="blue_mid"):
-    """Maakt een import/export-actieblok met knoopplaats en beschrijving."""
+    """
+    Maakt een actieblok voor de Import & Export-sheet bestaande uit:
+      - Rij (row)   : gekleurde knop-placeholder (tekstcel met knoopuiterlijk)
+      - Rij (row+1) : beschrijvingstekst (gemerged over B-D)
+      - Rij (row+2) : lege spacer-rij
+
+    De knop-placeholder wordt na VBA-injectie vervangen door een echte
+    Shape-knop via add_button() in de win32com-sectie.
+
+    Parameters
+    ----------
+    ws        : openpyxl.Worksheet
+    row       : int — startrij van het actieblok
+    btn_key   : str — vertaalsleutel voor de knoopkapsel
+    desc_key  : str — vertaalsleutel voor de beschrijvingstekst
+    btn_color : str — kleursleutel voor de knop (standaard blue_mid)
+
+    Geeft terug
+    -----------
+    int — volgende beschikbare startrij (row + 3)
+    """
     ws.row_dimensions[row].height = 34
     btn_cell = ws.cell(row=row, column=2)
     btn_cell.value = t(btn_key)
@@ -3698,6 +4408,27 @@ c.alignment = align("center", "center", wrap=True)
 ws_ref.row_dimensions[4].height = 10
 
 def ref_dim_table(ws, start_row, section_key, subtitle_key, desc_keys, n_cols=6):
+    """
+    Bouwt een classificatieschaalblok voor één CIA-dimensie in de Reference Values-sheet.
+    Structuur per blok:
+      - Sectiekop (marineblauwe balk)
+      - Subtitelrij (grijs)
+      - Kopregel: Niveau | Benaming | Omschrijving
+      - 5 datarijen (1 per classificatieniveau, gekleurd volgens LEVEL_FILLS/LEVEL_FONTS)
+
+    Parameters
+    ----------
+    ws           : openpyxl.Worksheet
+    start_row    : int — startrij van het blok
+    section_key  : str — vertaalsleutel voor de sectietitel
+    subtitle_key : str — vertaalsleutel voor de subtitelrij
+    desc_keys    : list[str] — lijst van 5 vertaalsleutels (niveau 1 t/m 5)
+    n_cols       : int — breedte van het blok in kolommen
+
+    Geeft terug
+    -----------
+    int — startrij voor het volgende blok (= row na het blok + 2 spacer)
+    """
     section_header(ws, start_row, section_key, n_cols)
     row = start_row + 1
     ws.row_dimensions[row].height = 22; ws.merge_cells(f"A{row}:{get_column_letter(n_cols)}{row}")
@@ -3740,11 +4471,30 @@ cur_ref = ref_dim_table(ws_ref, cur_ref, "ref_section_conf",  "ref_conf_subtitle
 
 # ── Kwetsbaarheden sheet ─────────────────────────────────────────────────────
 def _load_kwets_db():
-    """Laadt kwetsbaarheden + control-links uit Access DB.
-    Retourneert (vulns, ctrl_links_2025, unmatched_23ids):
-      vulns            = [(id, name, C_bool, I_bool, A_bool), ...]
-      ctrl_links_2025  = {vuln_id: set_of_2025_req_ids}   — via 2023→2025 mapping
-      unmatched_23ids  = {norm_2023_id}   — 2023 IDs zonder 2025 equivalent
+    """
+    Laadt kwetsbaarheden en control-links uit de Access-database ten tijde
+    van de Python build. Wordt alleen aangeroepen als pyodbc beschikbaar is
+    en de Access DB bestaat in data/Import/.
+
+    Geeft terug
+    -----------
+    tuple (vulns, ctrl_links_2025, unmatched_23ids) waarbij:
+      vulns            : list[(id, name, C_bool, I_bool, A_bool)] — kwetsbaarheden
+      ctrl_links_2025  : dict{vuln_id: set(norm_2025_req_ids)} — controls per kwetsbaarheid
+                         IDs zijn genormaliseerd via _norm_id() voor matching met sheet-koppen
+      unmatched_23ids  : set(norm_2023_id) — 2023-controls die niet gemapped zijn naar 2025
+
+    Werking
+    -------
+    1. Laad kwetsbaarheden uit T - Vulnerabilities
+    2. Laad RefNr → 2023 ID mapping uit T - CyFunEssentiel
+    3. Laad koppelingstabel LT - Vulnerability to control - fixed
+    4. Bouw 2023→2025 reverse mapping via _load_all_mappings()
+    5. Zet elke LT-link om: vuln_id → set(norm_2025_req_ids)
+       via: ctrl_ref → refnr_map[ctrl_ref] → norm_id → rev_map → norm_2025_id
+
+    Koppelingssleutel: T-Vulnerabilities.Reference (NIET .ID)
+    omdat LT.Vulnerability verwijst naar T-Vulnerabilities.Reference.
     """
     DB_PATH = Path(__file__).parent.parent / "data" / "Import" / "MNMTool - SocSec.accdb"
     if not DB_PATH.exists():
@@ -3777,20 +4527,28 @@ def _load_kwets_db():
 
     # ── Bouw 2023→2025 reverse mapping via MAPPING_SRC ────────────────────────
     # _load_all_mappings() geeft {norm_2025_id → "2023_id"} (both_map)
-    # We draaien dit om: {norm_2023_id → 2025_id}
-    rev_map = {}   # norm_2023_id → canonical 2025_id (string uit CYFUN_SRC)
+    # We draaien dit om naar {norm_2023_id → norm_2025_id} zodat we
+    # vanuit een 2023-ID direct het 2025-ID kunnen opzoeken.
+    # Normalisatie van 2023-IDs: trailing -N → .N (bv. "rs.co-3-2" → "rs.co-3.2")
+    # via re.sub zodat de sleutels consistent zijn met NormId23() in VBA.
+    rev_map = {}   # norm_2023_id → norm_2025_id
     try:
         both_map, _, _ = _load_all_mappings()
         for norm25, id23 in both_map.items():
             n23 = re.sub(r'-(\d+)$', r'.\1', str(id23).strip().lower())
-            # norm25 is already normalized; de-normalize to get original 2025 ID
-            # We need the original (non-normalized) 2025 ID to match sheet headers.
-            # Store norm_2023 → norm_2025 (sheet headers are compared normalized)
+            # norm25 is reeds genormaliseerd via _norm_id(); gebruik als target-ID
+            # voor matching met sheet-koppen in de Kwetsbaarheden-sheet.
             rev_map[n23] = norm25
     except Exception as e:
         print(f"[kwetsbaarheden] mapping-fout: {e}")
 
     # ── Verwerk LT-links: 2023 ID → 2025 ID via rev_map ──────────────────────
+    # Voor elke koppeling (vuln_id, ctrl_ref) in de LT-tabel:
+    #   1. ctrl_ref → refnr_map → 2023-ID string
+    #   2. normaliseer 2023-ID (re.sub trailing -N → .N)
+    #   3. rev_map → 2025-ID (of sla 2023-ID op als fallback / niet gevonden)
+    # Koppelingssleutel: LT.Vulnerability verwijst naar T-Vulnerabilities.Reference
+    # (NIET .ID — dit is een andere kolom in de Access-tabel!)
     ctrl_links_2025 = {}
     unmatched_23ids = set()
     for vuln_id_raw, ctrl_ref_raw in raw_links:
@@ -3976,8 +4734,21 @@ def build_kwetsbaarheden(ws):
 
 def build_afwijkingen(ws, afw_rows):
     """
-    Rapportagesheet: controls die in de Access DB als remediëring zijn gelinkt
-    maar NIET bestaan in de CyFun 2025 ESSENTIAL-set (Enkel-2023 controls).
+    Bouwt de Afwijkingen-rapportagesheet met controls die in de Access DB als
+    remediëring zijn gelinkt aan kwetsbaarheden, maar NIET bestaan in de
+    CyFun 2025 ESSENTIAL-set (zgn. "Enkel-2023" controls).
+
+    Deze sheet dient als technische verantwoording: de CISO kan zien welke
+    2023-controls niet meer van toepassing zijn in de 2025-versie en of
+    er actie nodig is (handmatige herclassificatie, archivering, …).
+
+    Parameters
+    ----------
+    ws       : openpyxl.Worksheet — het Afwijkingen-werkblad
+    afw_rows : list[(vname, cia_str, ctrl_id)] — afwijkende control-koppelingen
+               • vname   : naam van de kwetsbaarheid
+               • cia_str : betrokken CIA-dimensies (bv. "CI" of "CIA")
+               • ctrl_id : het 2023-control-ID dat niet gemapped kon worden
     """
     ROW_TITLE = 1
     ROW_HDR   = 2
@@ -4028,6 +4799,272 @@ def build_afwijkingen(ws, afw_rows):
 
     ws.auto_filter.ref = "A2:D2"
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHEET-BOUWERS: Risicobeheer | Controles | Acties
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_risicobeheer(ws):
+    """
+    Bouwt de Risicobeheer-sheet: risicobeheerplan per control per dependent asset.
+
+    De Streamlit-app vult deze sheet in via read/write met openpyxl.
+    Per rij staat de status van één CyFun-control voor één DA.
+
+    Structuur
+    ---------
+    Rij 1  : titelrij (gemerged A–H)
+    Rij 2  : kolomkoppen
+    Rij 3+ : data (één rij per control × DA-combinatie)
+
+    Kolommen
+    --------
+    A  Control ID      | B  Richtlijn       | C  Assurance  | D  Dependent Asset
+    E  Status          | F  Datum           | G  Verantwoordelijke | H  Opmerkingen
+    """
+    no_gridlines(ws)
+    COLS = [
+        ("Control ID",          14),
+        ("Richtlijn",           60),
+        ("Assurance",           13),
+        ("Dependent Asset",     25),
+        ("Status",              18),
+        ("Datum",               14),
+        ("Verantwoordelijke",   25),
+        ("Opmerkingen",         40),
+    ]
+    N = len(COLS)
+    LAST = get_column_letter(N)
+
+    set_col_widths(ws, [w for _, w in COLS])
+
+    # Titelrij
+    ws.merge_cells(f"A1:{LAST}1")
+    c = ws["A1"]
+    c.value = "Risicobeheer — Status maatregelen per control per afhankelijk asset"
+    c.fill = fill("navy"); c.font = font(13, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[1].height = 34
+
+    # Kolomkoppen
+    for col, (hdr, _) in enumerate(COLS, 1):
+        c = ws.cell(row=2, column=col, value=hdr)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True)
+        c.border = border_all("navy")
+    ws.row_dimensions[2].height = 30
+
+    # Dropdown: Status (kolom E = 5)
+    dv_status = DataValidation(
+        type="list",
+        formula1='"Uitgevoerd,Gepland,Niet uitvoeren"',
+        showDropDown=False, allow_blank=True
+    )
+    dv_status.sqref = f"E3:E2000"
+    ws.add_data_validation(dv_status)
+
+    # AutoFilter
+    ws.auto_filter.ref = f"A2:{LAST}2"
+
+    # Freeze panes: rij 1-2 altijd zichtbaar
+    ws.freeze_panes = "A3"
+
+    # Placeholder-rij (helpt zien dat de sheet leeg is bij verse build)
+    c = ws.cell(row=3, column=1,
+                value="(leeg — wordt ingevuld via Streamlit of via ImportGeselecteerdeControls)")
+    c.font = font(9, color="subtext", italic=True)
+    c.alignment = align("left", "center")
+
+
+def build_controles(ws):
+    """
+    Bouwt de Controles-sheet: schema voor periodieke controle van maatregelen.
+
+    Per rij staat één te controleren maatregel voor één DA, met frequentie,
+    methode, artefactenlocatie en datumopvolging.
+
+    Structuur
+    ---------
+    Rij 1  : titelrij
+    Rij 2  : kolomkoppen
+    Rij 3+ : data
+
+    Kolommen
+    --------
+    A  DA  | B  Control ID  | C  Maatregel  | D  Frequentie  | E  Methode
+    F  Artefacten locatie   | G  Laatste controle | H  Volgende controle | I  Status
+    """
+    no_gridlines(ws)
+    COLS = [
+        ("DA",                  25),
+        ("Control ID",          14),
+        ("Maatregel",           60),
+        ("Frequentie",          15),
+        ("Methode",             40),
+        ("Artefacten locatie",  50),
+        ("Laatste controle",    16),
+        ("Volgende controle",   16),
+        ("Status",              18),
+    ]
+    N = len(COLS)
+    LAST = get_column_letter(N)
+
+    set_col_widths(ws, [w for _, w in COLS])
+
+    # Titelrij
+    ws.merge_cells(f"A1:{LAST}1")
+    c = ws["A1"]
+    c.value = "Periodieke Controles — Schema voor opvolging van maatregelen"
+    c.fill = fill("navy"); c.font = font(13, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[1].height = 34
+
+    # Kolomkoppen
+    for col, (hdr, _) in enumerate(COLS, 1):
+        c = ws.cell(row=2, column=col, value=hdr)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True)
+        c.border = border_all("navy")
+    ws.row_dimensions[2].height = 30
+
+    # Dropdown: Frequentie (kolom D = 4)
+    dv_freq = DataValidation(
+        type="list",
+        formula1='"Maandelijks,Kwartaal,Halfjaarlijks,Jaarlijks,Ad hoc"',
+        showDropDown=False, allow_blank=True
+    )
+    dv_freq.sqref = "D3:D2000"
+    ws.add_data_validation(dv_freq)
+
+    # Dropdown: Status (kolom I = 9)
+    dv_status = DataValidation(
+        type="list",
+        formula1='"OK,Te controleren,Vervallen"',
+        showDropDown=False, allow_blank=True
+    )
+    dv_status.sqref = "I3:I2000"
+    ws.add_data_validation(dv_status)
+
+    # AutoFilter + freeze
+    ws.auto_filter.ref = f"A2:{LAST}2"
+    ws.freeze_panes = "A3"
+
+    # Datumopmaak voor kolommen G en H
+    for col_letter in ("G", "H"):
+        for r in range(3, 2001):
+            ws.cell(row=r, column=ord(col_letter) - 64).number_format = "DD/MM/YYYY"
+
+    # Placeholder
+    c = ws.cell(row=3, column=1,
+                value="(leeg — voeg controleregels toe via de Streamlit-app)")
+    c.font = font(9, color="subtext", italic=True)
+    c.alignment = align("left", "center")
+
+
+def build_acties(ws):
+    """
+    Bouwt de Acties-sheet: actielijst voor opvolging van maatregelen en controles.
+
+    Acties worden automatisch aangemaakt door de Streamlit-app (bv. bij het
+    plannen van een maatregel of het uitvoeren van een periodieke controle).
+
+    Structuur
+    ---------
+    Rij 1  : titelrij
+    Rij 2  : kolomkoppen
+    Rij 3+ : data
+
+    Kolommen
+    --------
+    A  Actie ID  | B  Type  | C  DA  | D  Control ID  | E  Omschrijving
+    F  Vervaldatum  | G  Verantwoordelijke  | H  Status  | I  Aangemaakt op
+    """
+    no_gridlines(ws)
+    COLS = [
+        ("Actie ID",            10),
+        ("Type",                20),
+        ("DA",                  25),
+        ("Control ID",          14),
+        ("Omschrijving",        60),
+        ("Vervaldatum",         14),
+        ("Verantwoordelijke",   25),
+        ("Status",              18),
+        ("Aangemaakt op",       16),
+    ]
+    N = len(COLS)
+    LAST = get_column_letter(N)
+
+    set_col_widths(ws, [w for _, w in COLS])
+
+    # Titelrij
+    ws.merge_cells(f"A1:{LAST}1")
+    c = ws["A1"]
+    c.value = "Acties — Opvolging van maatregelen en periodieke controles"
+    c.fill = fill("navy"); c.font = font(13, bold=True, color="white")
+    c.alignment = align("left", "center", indent=1)
+    ws.row_dimensions[1].height = 34
+
+    # Kolomkoppen
+    for col, (hdr, _) in enumerate(COLS, 1):
+        c = ws.cell(row=2, column=col, value=hdr)
+        c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
+        c.alignment = align("center", "center", wrap=True)
+        c.border = border_all("navy")
+    ws.row_dimensions[2].height = 30
+
+    # Dropdown: Type (kolom B = 2)
+    dv_type = DataValidation(
+        type="list",
+        formula1='"Periodieke controle,Maatregel,Opvolging"',
+        showDropDown=False, allow_blank=True
+    )
+    dv_type.sqref = "B3:B2000"
+    ws.add_data_validation(dv_type)
+
+    # Dropdown: Status (kolom H = 8)
+    dv_status = DataValidation(
+        type="list",
+        formula1='"Open,In uitvoering,Gesloten"',
+        showDropDown=False, allow_blank=True
+    )
+    dv_status.sqref = "H3:H2000"
+    ws.add_data_validation(dv_status)
+
+    # AutoFilter + freeze
+    ws.auto_filter.ref = f"A2:{LAST}2"
+    ws.freeze_panes = "A3"
+
+    # Datumopmaak voor kolommen F en I
+    for col_letter in ("F", "I"):
+        for r in range(3, 2001):
+            ws.cell(row=r, column=ord(col_letter) - 64).number_format = "DD/MM/YYYY"
+
+    # Conditionele opmaak: Open = lichtgeel, In uitvoering = lichtblauw, Gesloten = lichtgroen
+    from openpyxl.formatting.rule import CellIsRule
+    status_col = "H"
+    ws.conditional_formatting.add(
+        f"{status_col}3:{status_col}2000",
+        CellIsRule(operator="equal", formula=['"Open"'],
+                   fill=PatternFill("solid", fgColor="FEF9C3"))
+    )
+    ws.conditional_formatting.add(
+        f"{status_col}3:{status_col}2000",
+        CellIsRule(operator="equal", formula=['"In uitvoering"'],
+                   fill=PatternFill("solid", fgColor="DBEAFE"))
+    )
+    ws.conditional_formatting.add(
+        f"{status_col}3:{status_col}2000",
+        CellIsRule(operator="equal", formula=['"Gesloten"'],
+                   fill=PatternFill("solid", fgColor="DCFCE7"))
+    )
+
+    # Placeholder
+    c = ws.cell(row=3, column=1,
+                value="(leeg — acties worden aangemaakt via de Streamlit-app)")
+    c.font = font(9, color="subtext", italic=True)
+    c.alignment = align("left", "center")
+
+
 # ── CyFun Controls sheet ─────────────────────────────────────────────────────
 # Kolomindeling:  A–F = 2025 data  |  G = Versie  |  H–M = 2023 data
 COL_25_START = 1   # A
@@ -4035,17 +5072,37 @@ COL_VERSIE   = 7   # G
 COL_23_START = 8   # H
 
 def _norm_id(s):
-    """Lowercase + trailing -N → .N  (bv. 'ID.AM-03-3' → 'id.am-03.3')."""
+    """
+    Normaliseert een CyFun ID-string naar een vergelijkbaar lowercase formaat.
+    Converteert trailing -N naar .N zodat 'ID.AM-03-3' → 'id.am-03.3'.
+    Wordt gebruikt als sleutel in both_map/only25 voor consistente vergelijkingen.
+
+    Parameters
+    ----------
+    s : str — raw ID-string (kan hoofdletters en verschillende delimiters bevatten)
+
+    Geeft terug
+    -----------
+    str — genormaliseerde ID (lowercase, trailing koppelteken vervangen door punt)
+    """
     return re.sub(r'-(\d+)$', r'.\1', str(s).strip().lower())
 
 def _load_all_mappings():
     """
-    Doorloop de 3 sheets van het mapping-workbook.
-    Geeft terug:
-      both_map  : {norm_2025_id → "2023_id"}
-      only25    : {norm 2025-only IDs}
-      only23    : lijst van {id, ctrl_linked, key_meas} — 2023-only controls
-    BASIC-sheet heeft geen DELETED/NEW-kolommen; IMPORTANT/ESSENTIAL wel.
+    Laadt de 2023↔2025 control-mapping vanuit het MAPPING_SRC-werkboek.
+    Het werkboek bevat 3 sheets (CyFun 2023>25 BASIC, IMPORTANT, ESSENTIAL).
+
+    BASIC-sheet heeft geen DELETED/NEW-kolommen; kolomindeling is anders:
+      [0]=2023_ID, [2]=km23, [4]=2025_ID
+    IMPORTANT/ESSENTIAL hebben wel DELETED/NEW-flags:
+      [0]=2023_ID, [2]=km23, [3]=DELETED, [5]=2025_ID, [8]=New
+
+    Geeft terug
+    -----------
+    tuple (both_map, only25, only23) waarbij:
+      both_map : dict{norm_2025_id → "2023_id_raw"} — controls die in beide versies bestaan
+      only25   : set(norm_2025_id) — nieuwe controls in 2025 (geen 2023-equivalent)
+      only23   : list[dict{id, ctrl_linked, key_meas}] — verwijderde/enkel-2023 controls
     """
     both_map, only25, only23 = {}, set(), []
     if not MAPPING_SRC.exists():
@@ -4095,9 +5152,24 @@ def _load_all_mappings():
 
 def _load_2023_details(target_ids):
     """
-    Zoek target_ids op in alle 3 Details-sheets van het 2023-workbook.
-    Requirement-prefix: 'BASIC_' → Basic, 'IMPORTANT_' → Important, geen → Essential.
-    Geeft {req_id → {category, subcategory, assurance, requirement, key_meas}}.
+    Zoekt details op voor een set van 2023-control IDs in de Details-sheets
+    van het CyFun 2023 bronwerkboek (CYFUN23_SRC).
+
+    De Details-sheets ESSENTIAL Details, IMPORTANT Details en BASIC Details
+    worden in die volgorde doorzocht. Een control wordt niet dubbel geladen
+    (req_id in found → overslaan).
+    Assurance-niveau bepaling:
+      - prefix "BASIC_"     → Basic
+      - prefix "IMPORTANT_" → Important
+      - geen prefix         → niveau van de sheet (Essential / Important / Basic)
+
+    Parameters
+    ----------
+    target_ids : set(str) — ruwe 2023 requirement IDs (bv. "RS.CO-3.2")
+
+    Geeft terug
+    -----------
+    dict{req_id → {category, subcategory, assurance, requirement, key_meas, ctrl_linked}}
     """
     found = {}
     if not CYFUN23_SRC.exists():
@@ -4149,6 +5221,10 @@ def _load_2023_details(target_ids):
     wb.close()
     return found
 
+# STATUS_STYLE: kleuring per versie-status in de CyFun Controls-sheet.
+# "Beide"     : control bestaat in 2023 én 2025 → groen
+# "Enkel 2025": nieuw in 2025 (geen 2023-equivalent) → blauw
+# "Enkel 2023": verwijderd uit 2025 → oranje
 STATUS_STYLE = {
     "Beide":      ("green_light",  "green"),
     "Enkel 2025": ("blue_xlight",  "blue_mid"),
@@ -4157,8 +5233,23 @@ STATUS_STYLE = {
 
 def _write_side(ws, data_row, col_start, vals6, assurance, row_bg, assurance_style):
     """
-    Schrijf 6 datacellen (Category/Controls/KeyMeasure/Subcategory/Assurance/Requirement)
-    vanaf col_start. vals6=None schrijft lege cellen met rand.
+    Schrijft 6 datacellen voor één zijde van de CyFun Controls vergelijkingstabel
+    (2025-zijde: kolommen A-F of 2023-zijde: kolommen H-M).
+
+    Kolomvolgorde (1-gebaseerd binnen de 6 cellen):
+      1 = Category        4 = Subcategory
+      2 = Controls linked 5 = Assurance level (gekleurde badge)
+      3 = Key Measure     6 = Requirement (volledige tekst, wrap)
+
+    Parameters
+    ----------
+    ws              : openpyxl.Worksheet
+    data_row        : int — rijnummer
+    col_start       : int — startkolom (COL_25_START of COL_23_START)
+    vals6           : list[str] | None — 6 celwaarden; None schrijft lege cellen
+    assurance       : str — assurance-niveau voor kleurstijl ("Basic" / "Important" / "Essential")
+    row_bg          : str — achtergrondkleursleutel voor wisselende strepen
+    assurance_style : dict — mapping assurance → (bg_key, fg_key)
     """
     bg_key, fg_key = assurance_style.get(assurance, ("white", "text"))
     values = vals6 if vals6 is not None else [""] * 6
@@ -4184,7 +5275,16 @@ def _write_side(ws, data_row, col_start, vals6, assurance, row_bg, assurance_sty
             c.alignment = align("left", "top", wrap=True)
 
 def _write_versie(ws, data_row, status):
-    """Schrijf de Versie-cel (kolom G)."""
+    """
+    Schrijft de Versie-cel (kolom G) voor één datarij in de CyFun Controls-sheet.
+    De kleur wordt bepaald door STATUS_STYLE op basis van de status-string.
+
+    Parameters
+    ----------
+    ws       : openpyxl.Worksheet
+    data_row : int — rijnummer
+    status   : str — "Beide", "Enkel 2025" of "Enkel 2023"
+    """
     sbg, sfg = STATUS_STYLE.get(status, ("white", "text"))
     c = ws.cell(row=data_row, column=COL_VERSIE, value=status)
     c.border = border_all("grey_border")
@@ -4193,6 +5293,22 @@ def _write_versie(ws, data_row, status):
     c.alignment = align("center", "top")
 
 def build_cyfun_controls(ws):
+    """
+    Bouwt de CyFun Controls vergelijkingssheet met een zij-aan-zij overzicht
+    van CyFun 2025 ESSENTIAL controls (kolommen A-F) en hun 2023-equivalenten
+    (kolommen H-M), gescheiden door een Versie-kolom (G).
+
+    Structuur:
+      Rij 1  : Titelregel
+      Rij 2  : Groepskoppen "CyFun 2025" (A-F), "Versie" (G), "CyFun 2023" (H-M)
+      Rij 3  : Kolomkoppen (13 kolommen)
+      Rij 4+ : Data (2025-controls uit CYFUN_SRC, met bijhorende 2023-gegevens)
+      Scheidingsregel + Enkel-2023 controls onderaan
+
+    Parameters
+    ----------
+    ws : openpyxl.Worksheet — het CyFun Controls-werkblad
+    """
     CYFUN_TABS = ["GOVERN", "IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]
     # 6 kolomnamen per zijde
     HDR_25 = ["Category",
@@ -4360,11 +5476,28 @@ afw_rows = build_kwetsbaarheden(ws_kwets)
 ws_afw = wb.create_sheet("Afwijkingen")
 build_afwijkingen(ws_afw, afw_rows)
 
+# ── Nieuwe sheets: Risicobeheer | Controles | Acties ──────────────────────────
+ws_risico = wb.create_sheet("Risicobeheer")
+build_risicobeheer(ws_risico)
+
+ws_controles = wb.create_sheet("Controles")
+build_controles(ws_controles)
+
+ws_acties = wb.create_sheet("Acties")
+build_acties(ws_acties)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # OPSLAAN ALS XLSX + VBA INJECTEREN VIA WIN32COM → XLSM
 # ══════════════════════════════════════════════════════════════════════════════
+# Stap 1: openpyxl kan geen .xlsm bestanden met macro's opslaan.
+#         Sla eerst op als .xlsx (zonder macro's) als tussenstap.
+# Stap 2: open het .xlsx-bestand via win32com (COM-automatisering met Excel),
+#         injecteer alle VBA-code en sla op als .xlsm.
+# Stap 3: verwijder het .xlsx-tussenstap.
+
 OUT_XLSX.parent.mkdir(parents=True, exist_ok=True)
-# _Lang werd als eerste aangemaakt (wb.active) — verschuif naar einde
+# _Lang werd als eerste aangemaakt (wb.active) — verschuif naar het einde van
+# de tabbladen zodat het verborgen blad niet het eerste tabblad is na openen.
 wb.move_sheet("_Lang", offset=len(wb.sheetnames) - 1)
 wb.save(OUT_XLSX)
 print(f"Tussenstap opgeslagen: {OUT_XLSX}")
@@ -4382,19 +5515,27 @@ try:
 
     wb_com = xl.Workbooks.Open(str(OUT_XLSX.resolve()))
 
-    # Voeg VBA-module toe
+    # ── Voeg GRC_Macros standaardmodule toe ──────────────────────────────────
+    # vbext_ct_StdModule = 1 (standaard codemodule)
+    # Attribute VB_Name is VBE-bestandsmetadata en wordt afzonderlijk gezet
+    # via mod.Name; het mag NIET in de AddFromString-aanroep staan
+    # (veroorzaakt een VBE-compilatiefout).
     mod = wb_com.VBProject.VBComponents.Add(1)   # 1 = vbext_ct_StdModule
     mod.Name = "GRC_Macros"
-    # Attribute VB_Name is VBE-metadata en mag NIET via AddFromString worden doorgegeven
     code_for_vba = "\n".join(
         line for line in VBA_CODE.splitlines()
         if not line.startswith("Attribute VB_Name")
     )
     mod.CodeModule.AddFromString(code_for_vba)
 
-    # Voeg knoppen toe op Import & Export-blad
+    # ── Actieknoppen op Import & Export-blad ─────────────────────────────────
+    # De knoppen worden als msoShapeRectangle (1) toegevoegd; positie en afmetingen
+    # zijn in punten (1 punt ≈ 0.035 cm). Elke knop krijgt een OnAction-macro.
+    # De opmaakstijl (kleur, lettertype) bootst de knop-placeholder-cellen na
+    # die in de openpyxl-fase zijn aangemaakt.
     ws_ie_com = wb_com.Sheets("Import & Export")
     def add_button(ws, left, top, w, h, caption, macro):
+        """Voegt een rechthoekige klikknop toe aan het opgegeven werkblad."""
         btn = ws.Shapes.AddShape(1, left, top, w, h)   # 1 = msoShapeRectangle
         btn.Fill.ForeColor.RGB = int("2563EB", 16)
         btn.Line.Visible = False
@@ -4413,7 +5554,10 @@ try:
     add_button(ws_ie_com, 10, 482, 200, 44, "▶  Importeer Kwetsbaarheden",            "GRC_Macros.ImportKwetsbaarheden")
     add_button(ws_ie_com, 10, 570, 200, 44, "▶  Importeer Links DA/Kwetsbaarheden",   "GRC_Macros.ImportLinksKwetsbaarheden")
 
-    # Maak UserForm "AssetPicker" aan
+    # ── UserForm AssetPicker ──────────────────────────────────────────────────
+    # vbext_ct_MSForm = 3 (UserForm component)
+    # Controls worden programmatisch toegevoegd via uf.Designer.Controls.Add().
+    # De VBA-eventcode (USERFORM_CODE) wordt achteraf via CodeModule geïnjecteerd.
     uf = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm
     uf.Name = "AssetPicker"
     uf.Properties("Caption").Value = "Selecteer Informatieassets"
@@ -4431,8 +5575,8 @@ try:
     lb = uf.Designer.Controls.Add("Forms.ListBox.1")
     lb.Name        = "lstAssets"
     lb.Left        = 10; lb.Top = 34; lb.Width = 306; lb.Height = 252
-    lb.MultiSelect = 1   # fmMultiSelectMulti
-    lb.ListStyle   = 1   # fmListStyleOption (checkboxen)
+    lb.MultiSelect = 1   # fmMultiSelectMulti: meerdere items tegelijk selecteerbaar
+    lb.ListStyle   = 1   # fmListStyleOption: toont checkboxen naast elk item
 
     # OK-knop (groen)
     btnOK = uf.Designer.Controls.Add("Forms.CommandButton.1")
@@ -4453,27 +5597,35 @@ try:
     # Voeg UserForm code toe
     uf.CodeModule.AddFromString(USERFORM_CODE)
 
-    # Voeg Worksheet_SelectionChange toe aan Processes sheet module
+    # ── Sheet-event modules injecteren ───────────────────────────────────────
+    # Elk werkblad heeft een eigen VBComponent (Sheet-module) dat bereikbaar is
+    # via wb_com.Sheets(naam).CodeName (bv. "Sheet1", "Sheet2", …).
+    # De event-handlers worden rechtstreeks in dat component geïnjecteerd.
+
+    # Processes: SelectionChange → AssetPicker-popup voor kolom K/L
     proc_code_name = wb_com.Sheets("Processes").CodeName
     proc_mod = wb_com.VBProject.VBComponents(proc_code_name)
     proc_mod.CodeModule.AddFromString(PROC_SHEET_CODE)
 
-    # Voeg Worksheet_Activate toe aan Information Assets sheet module
+    # Information Assets: Activate → herbereken "Gebruikt in processen" (col I)
     ia_code_name = wb_com.Sheets("Information Assets").CodeName
     ia_mod = wb_com.VBProject.VBComponents(ia_code_name)
     ia_mod.CodeModule.AddFromString(INFO_ASSET_SHEET_CODE)
 
-    # Voeg Worksheet_Activate toe aan Dependent Assets sheet module
+    # Dependent Assets: Activate + Change + BeforeDoubleClick
     dep_code_name = wb_com.Sheets("Dependent Assets").CodeName
     dep_mod = wb_com.VBProject.VBComponents(dep_code_name)
     dep_mod.CodeModule.AddFromString(DEP_ASSET_SHEET_CODE)
 
-    # Voeg BeforeDoubleClick toggle toe aan Kwetsbaarheden sheet module
+    # Kwetsbaarheden: BeforeDoubleClick → ✔-toggle in matrix
     kwets_code_name = wb_com.Sheets("Kwetsbaarheden").CodeName
     kwets_mod = wb_com.VBProject.VBComponents(kwets_code_name)
     kwets_mod.CodeModule.AddFromString(KWETS_SHEET_CODE)
 
-    # Maak UserForm "VulnPicker" aan (kwetsbaarheidselectie + probabiliteit per vuln)
+    # ── UserForm VulnPicker ───────────────────────────────────────────────────
+    # Complexer formulier dan AssetPicker: bevat een scrollbaar Frame (frmVulns)
+    # dat dynamisch in VBA wordt gevuld met CheckBox + ComboBox per kwetsbaarheid.
+    # Afmetingen zijn in punten (+28 pt ≈ 1 cm extra voor marges).
     vp = wb_com.VBProject.VBComponents.Add(3)   # 3 = vbext_ct_MSForm
     vp.Name = "VulnPicker"
     vp.Properties("Caption").Value = "Kwetsbaarheden selecteren"
@@ -4499,8 +5651,8 @@ try:
     frm_vp.Name = "frmVulns"
     frm_vp.Caption = ""
     frm_vp.Left = 8; frm_vp.Top = 46; frm_vp.Width = 426; frm_vp.Height = 388
-    frm_vp.ScrollBars = 2          # fmScrollBarsVertical
-    frm_vp.KeepScrollBarsVisible = 2  # alleen verticaal tonen wanneer nodig
+    frm_vp.ScrollBars = 2          # fmScrollBarsVertical: enkel verticaal scrollen
+    frm_vp.KeepScrollBarsVisible = 2  # toon scrollbalk alleen wanneer inhoud de frame overschrijdt
     # Annuleer-knop (links)
     btn_vp_ann = vp_des.Controls.Add("Forms.CommandButton.1")
     btn_vp_ann.Name = "btnAnnuleer"; btn_vp_ann.Caption = "Annuleer"
@@ -4515,18 +5667,20 @@ try:
     btn_vp_ok.ForeColor  = int("FFFFFF", 16)
     vp.CodeModule.AddFromString(VULNPICKER_CODE)
 
-    # Voeg SelectionChange toe aan RARM sheet module
+    # RARM: Activate + BeforeDoubleClick + SelectionChange (VulnPicker)
     rarm_code_name = wb_com.Sheets("RARM").CodeName
     rarm_mod = wb_com.VBProject.VBComponents(rarm_code_name)
     rarm_mod.CodeModule.AddFromString(RARM_SHEET_CODE)
 
-    # Sla op als .xlsm
-    wb_com.SaveAs(str(OUT.resolve()), FileFormat=52)   # 52 = xlOpenXMLWorkbookMacroEnabled
+    # ── Opslaan als .xlsm en opruimen ────────────────────────────────────────
+    # FileFormat=52 = xlOpenXMLWorkbookMacroEnabled (.xlsm)
+    # Close(False) = niet nogmaals opslaan bij sluiten (voorkomen dubbele dialoog)
+    wb_com.SaveAs(str(OUT.resolve()), FileFormat=52)
     wb_com.Close(False)
     xl.Quit()
     pythoncom.CoUninitialize()
 
-    OUT_XLSX.unlink()   # verwijder tussenstap
+    OUT_XLSX.unlink()   # verwijder het .xlsx-tussenstap — enkel het .xlsm blijft over
     vba_ok = True
     print(f"GRC Tool v0.3 (macro-enabled) opgeslagen: {OUT}")
 

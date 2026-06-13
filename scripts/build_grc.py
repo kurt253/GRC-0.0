@@ -1084,8 +1084,8 @@ End Sub
 ' control gedefinieerd → vinkje wordt genegeerd.
 Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
     If Target.Cells.Count > 1 Then Exit Sub
-    If Target.Row < 4 Then Exit Sub
-    If Target.Column < 4 Then Exit Sub
+    If Target.Row < 8 Then Exit Sub
+    If Target.Column < 6 Then Exit Sub
     If CStr(Me.Cells(Target.Row, 1).Value) = "" Then Exit Sub
     Cancel = True
     If CStr(Target.Value) = ChrW(10004) Then
@@ -1106,7 +1106,7 @@ End Sub
 Private Sub Worksheet_SelectionChange(ByVal Target As Range)
     If Target.Cells.Count > 1 Then Exit Sub
     If Target.Row <> 3 Then Exit Sub
-    If Target.Column < 5 Then Exit Sub
+    If Target.Column < 6 Then Exit Sub
     Application.EnableEvents = False
     GRC_Macros.TonenVulnPicker Target.Column
     Application.EnableEvents = True
@@ -1349,6 +1349,24 @@ Public g_PickerTargetCol As Long     ' Doelkolom in Processen (11 = info assets,
 Public g_RARMCol As Long             ' Kolom in RARM-sheet waarop geklikt werd (vuln picker)
 
 ' GRC Tool v0.3 - Import & Export via MS Access (ADO)
+
+' ── CIALbl ────────────────────────────────────────────────────────────────────
+' Zet een CIA-niveau (1-5) om naar een leesbaar label (NL).
+Function CIALbl(val As Variant) As String
+    On Error GoTo fallback
+    If IsEmpty(val) Or IsNull(val) Or CStr(val) = "" Then CIALbl = "": Exit Function
+    Select Case CLng(val)
+        Case 1: CIALbl = "Laag"
+        Case 2: CIALbl = "Gemiddeld"
+        Case 3: CIALbl = "Hoog"
+        Case 4: CIALbl = "Zeer Hoog"
+        Case 5: CIALbl = "Kritiek"
+        Case Else: CIALbl = CStr(val)
+    End Select
+    Exit Function
+fallback:
+    CIALbl = CStr(val)
+End Function
 
 ' ── MapCls ────────────────────────────────────────────────────────────────────
 ' Zet een classificatietekst of -cijfer (uit Access) om naar een geheel getal 1-5.
@@ -2055,9 +2073,9 @@ End Sub
 ' het blad "Controls 2023 - DA" voor rapportage aan de CISO.
 Sub ImportGeselecteerdeControls(conn As Object)
     Const RARM_ROW_DA   As Long = 2
-    Const RARM_ROW_DATA As Long = 4
+    Const RARM_ROW_DATA As Long = 8
     Const RARM_COL_ID   As Long = 1
-    Const RARM_COL_DA   As Long = 5
+    Const RARM_COL_DA   As Long = 6
     Const COL_CF25      As Integer = 6
     Const COL_CF23      As Integer = 13
     Const ROW_CF_DATA   As Integer = 4
@@ -2350,7 +2368,7 @@ End Function
 Sub ImportRARMKwetsbaarheden(conn As Object)
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
-    Const RARM_COL_DA   As Long = 5
+    Const RARM_COL_DA   As Long = 6
 
     Dim wsR As Worksheet
     On Error Resume Next
@@ -2447,9 +2465,9 @@ End Sub
 Sub RefreshRARMKolommen()
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
-    Const RARM_ROW_DATA As Long = 4
+    Const RARM_ROW_DATA As Long = 8
     Const RARM_COL_ID   As Long = 1
-    Const RARM_COL_DA   As Long = 5
+    Const RARM_COL_DA   As Long = 6
     Const DA_COL_NAAM   As Long = 2
     Const DA_COL_OARCH  As Long = 6
     Dim wsR As Worksheet, wsD As Worksheet
@@ -2467,14 +2485,18 @@ Sub RefreshRARMKolommen()
     ' Reset het volledige DA-zone: koppen (rij 2-3) + datacellen — zodat verwijderde
     ' kolommen geen opmaakrestanten achterlaten
     If lastCol >= RARM_COL_DA Then
-        Dim hdrRng As Range, dataRng As Range
+        Dim hdrRng As Range, dataRng As Range, ciaRng As Range
         Set hdrRng  = wsR.Range(wsR.Cells(RARM_ROW_DA, RARM_COL_DA), _
                                 wsR.Cells(RARM_ROW_VULN, lastCol + 5))
+        Set ciaRng  = wsR.Range(wsR.Cells(4, RARM_COL_DA), wsR.Cells(7, lastCol + 5))
         Set dataRng = wsR.Range(wsR.Cells(RARM_ROW_DATA, RARM_COL_DA), _
                                 wsR.Cells(rarmLastData, lastCol + 5))
         hdrRng.ClearContents
         hdrRng.Interior.ColorIndex  = xlNone
         hdrRng.Borders.LineStyle    = xlNone
+        ciaRng.ClearContents
+        ciaRng.Interior.ColorIndex  = xlNone
+        ciaRng.Borders.LineStyle    = xlNone
         dataRng.Interior.ColorIndex = xlNone
         dataRng.Borders.LineStyle   = xlNone
     End If
@@ -2482,6 +2504,7 @@ Sub RefreshRARMKolommen()
     Dim col As Long
     col = RARM_COL_DA
     Dim r As Long, daNaam As String, isOarch As Boolean
+    Dim rC8 As String, rCB As String
     For r = 6 To 105
         daNaam = Trim(CStr(wsD.Cells(r, DA_COL_NAAM).Value))
         If daNaam <> "" Then
@@ -2511,6 +2534,20 @@ Sub RefreshRARMKolommen()
                 .Borders.LineStyle = xlContinuous
                 .Borders.Color     = RGB(15, 43, 70)
             End With
+            ' CIA-objectieven (rijen 4-6) vanuit DA-sheet; aangevinkt-teller (rij 7)
+            rC8 = wsR.Cells(RARM_ROW_DATA, col).Address(False, False)
+            rCB = wsR.Cells(1048576, col).Address(False, False)
+            wsR.Cells(4, col).Value = CIALbl(wsD.Cells(r, 16).Value)
+            wsR.Cells(5, col).Value = CIALbl(wsD.Cells(r, 18).Value)
+            wsR.Cells(6, col).Value = CIALbl(wsD.Cells(r, 20).Value)
+            wsR.Cells(7, col).Formula = "=COUNTA(" & rC8 & ":" & rCB & ")"
+            With wsR.Range(wsR.Cells(4, col), wsR.Cells(7, col))
+                .HorizontalAlignment = xlCenter
+                .VerticalAlignment = xlCenter
+                .Interior.Color = RGB(239, 246, 255)
+                .Borders.LineStyle = xlContinuous
+                .Borders.Color     = RGB(15, 43, 70)
+            End With
             wsR.Columns(col).ColumnWidth = 22
             col = col + 1
         End If
@@ -2530,7 +2567,7 @@ End Sub
 ' KleurRARMKolom aan. Stopt bij de eerste lege kolomkop (einde DA-zone).
 Sub KleurAlleRARMKolommen()
     Const RARM_ROW_DA As Long = 2
-    Const RARM_COL_DA As Long = 5
+    Const RARM_COL_DA As Long = 6
     Dim wsR As Worksheet
     On Error Resume Next
     Set wsR = ThisWorkbook.Sheets("RARM")
@@ -2559,9 +2596,9 @@ End Sub
 Sub SyncRARMKolommen()
     Const RARM_ROW_DA   As Long = 2
     Const RARM_ROW_VULN As Long = 3
-    Const RARM_ROW_DATA As Long = 4
+    Const RARM_ROW_DATA As Long = 8
     Const RARM_COL_ID   As Long = 1
-    Const RARM_COL_DA   As Long = 5
+    Const RARM_COL_DA   As Long = 6
     Const DA_COL_NAAM   As Long = 2
     Const DA_COL_OARCH  As Long = 6
 
@@ -2612,6 +2649,12 @@ Sub SyncRARMKolommen()
             .Interior.ColorIndex = xlNone
             .Borders.LineStyle   = xlNone
         End With
+        ' Wis CIA-objectief rijen (4-7) en aangevinkt-teller
+        With wsR.Range(wsR.Cells(4, RARM_COL_DA), wsR.Cells(7, clearTo))
+            .ClearContents
+            .Interior.ColorIndex = xlNone
+            .Borders.LineStyle   = xlNone
+        End With
         With wsR.Range(wsR.Cells(RARM_ROW_DATA, RARM_COL_DA), wsR.Cells(rarmLast, clearTo))
             .ClearContents
             .Interior.ColorIndex = xlNone
@@ -2623,6 +2666,8 @@ Sub SyncRARMKolommen()
     Dim col As Long
     col = RARM_COL_DA
     Dim daR As Long, daNameRaw As String, isOarch As Boolean, dkLow As String
+    Dim daS As Long, ciaC As Variant, ciaI As Variant, ciaA As Variant
+    Dim rC8 As String, rCB As String
     For daR = 6 To 105
         daNameRaw = Trim(CStr(wsD.Cells(daR, DA_COL_NAAM).Value))
         If daNameRaw <> "" Then
@@ -2649,6 +2694,30 @@ Sub SyncRARMKolommen()
                 .HorizontalAlignment = xlCenter
                 .VerticalAlignment = xlCenter
                 .WrapText = True
+                .Borders.LineStyle = xlContinuous
+                .Borders.Color     = RGB(15, 43, 70)
+            End With
+
+            ' CIA-objectieven (rijen 4-6) vanuit DA-sheet; aangevinkt-teller (rij 7)
+            ciaC = "": ciaI = "": ciaA = ""
+            For daS = 6 To 105
+                If LCase(Trim(CStr(wsD.Cells(daS, DA_COL_NAAM).Value))) = dkLow Then
+                    ciaC = wsD.Cells(daS, 16).Value
+                    ciaI = wsD.Cells(daS, 18).Value
+                    ciaA = wsD.Cells(daS, 20).Value
+                    Exit For
+                End If
+            Next daS
+            rC8 = wsR.Cells(RARM_ROW_DATA, col).Address(False, False)
+            rCB = wsR.Cells(1048576, col).Address(False, False)
+            wsR.Cells(4, col).Value = CIALbl(ciaC)
+            wsR.Cells(5, col).Value = CIALbl(ciaI)
+            wsR.Cells(6, col).Value = CIALbl(ciaA)
+            wsR.Cells(7, col).Formula = "=COUNTA(" & rC8 & ":" & rCB & ")"
+            With wsR.Range(wsR.Cells(4, col), wsR.Cells(7, col))
+                .HorizontalAlignment = xlCenter
+                .VerticalAlignment = xlCenter
+                .Interior.Color = RGB(239, 246, 255)
                 .Borders.LineStyle = xlContinuous
                 .Borders.Color     = RGB(15, 43, 70)
             End With
@@ -2697,9 +2766,9 @@ End Sub
 Sub KleurRARMKolom(targetCol As Long)
     Const RARM_ROW_DA      As Long = 2
     Const RARM_ROW_VULN    As Long = 3
-    Const RARM_ROW_DATA    As Long = 4
+    Const RARM_ROW_DATA    As Long = 8
     Const RARM_COL_ID      As Long = 1
-    Const RARM_COL_DA      As Long = 5
+    Const RARM_COL_DA      As Long = 6
     Const DA_COL_NAAM      As Long = 2
     Const DA_COL_OARCH     As Long = 6
 
@@ -4121,26 +4190,27 @@ def build_rarm(ws):
     Opbouw:
       Rij 1  : Titelbalk (gemerged over alle kolommen)
       Rij 2  : Kolomkoppen — A=Control ID, B=Richtlijn, C=Assurance, D=Sleutelmaatregel,
-               E+ = placeholder DA-kolommen (worden overschreven door RefreshRARMKolommen)
-      Rij 3  : Kwetsbaarheden-rij — klikken op een DA-kolom opent VulnPicker
-      Rij 4+ : CyFun 2025 ESSENTIAL controls (uit CYFUN_SRC, tabs GOVERN t/m RECOVER)
-
-    De DA-kolommen (E+) zijn dynamisch: RefreshRARMKolommen vult ze in op basis van
-    het Dependent Assets-blad. De matrix wordt opgebouwd met N_TEMPLATE=10 lege
-    placeholder-kolommen die na VBA-injectie worden overschreven.
-
-    Parameters
-    ----------
-    ws : openpyxl.Worksheet — het RARM-werkblad
+               E=# Aangevinkt, F+ = placeholder DA-kolommen
+      Rij 3  : Kwetsbaarheden-rij
+      Rij 4  : C Objectief per DA (confidentialiteit)
+      Rij 5  : I Objectief per DA (integriteit)
+      Rij 6  : A Objectief per DA (beschikbaarheid)
+      Rij 7  : Aangevinkt-teller per DA (COUNTIF ✔ in controlrijen)
+      Rij 8+ : CyFun 2025 ESSENTIAL controls
     """
     ROW_DA       = 2
     ROW_VULN     = 3
-    ROW_DATA     = 4
+    ROW_C_OBJ    = 4
+    ROW_I_OBJ    = 5
+    ROW_A_OBJ    = 6
+    ROW_COUNT    = 7
+    ROW_DATA     = 8
     COL_ID       = 1
     COL_TITLE    = 2
     COL_ASS      = 3
     COL_KM       = 4   # Sleutelmaatregel (key measure)
-    COL_DA_START = 5
+    COL_COUNT    = 5   # # Aangevinkt (COUNTIF per control row)
+    COL_DA_START = 6
     N_TEMPLATE   = 10
 
     CYFUN_TABS = ["GOVERN", "IDENTIFY", "PROTECT", "DETECT", "RESPOND", "RECOVER"]
@@ -4153,18 +4223,11 @@ def build_rarm(ws):
     ws.column_dimensions["B"].width = 60
     ws.column_dimensions["C"].width = 13
     ws.column_dimensions["D"].width = 18   # Sleutelmaatregel
+    ws.column_dimensions["E"].width = 14   # # Aangevinkt
     for k in range(N_TEMPLATE):
         ws.column_dimensions[get_column_letter(COL_DA_START + k)].width = 22
 
     # ── Controls laden uit CYFUN_SRC ──────────────────────────────────────────
-    # Kolom-indeling in de CyFun 2025 ESSENTIAL bron (rij 3+):
-    #   row[0] = Category (GOVERN / IDENTIFY / …)
-    #   row[1] = Controls linked to management aspects
-    #   row[2] = Key Measure (niet leeg → is_km = True)
-    #   row[3] = Subcategory
-    #   row[4] = Assurance level (Basic / Important / Essential)
-    #   row[5] = Requirement text: "ID.AM-03: De organisatie inventariseert..."
-    # req_text.split(":", 1) scheidt het ID van de beschrijving.
     controls = []
     if CYFUN_SRC.exists():
         src_wb = load_workbook(str(CYFUN_SRC), read_only=True, data_only=True)
@@ -4183,6 +4246,7 @@ def build_rarm(ws):
                 controls.append((req_id, req_title, assurance, is_km))
         src_wb.close()
 
+    # ── Rij 1: titelrij ───────────────────────────────────────────────────────
     ws.merge_cells(f"A1:{LAST_COL}1")
     c = ws["A1"]
     c.value = "RARM — Risk Assessment & Remediation Matrix"
@@ -4190,9 +4254,11 @@ def build_rarm(ws):
     c.alignment = align("left", "center", indent=1)
     ws.row_dimensions[1].height = 34
 
+    # ── Rij 2: kolomkoppen ────────────────────────────────────────────────────
     ws.row_dimensions[2].height = 36
     for col_idx, label in [(COL_ID, "Control ID"), (COL_TITLE, "Richtlijn"),
-                           (COL_ASS, "Assurance"), (COL_KM, "Sleutelmaatregel")]:
+                           (COL_ASS, "Assurance"), (COL_KM, "Sleutelmaatregel"),
+                           (COL_COUNT, "# Aangevinkt")]:
         c = ws.cell(row=ROW_DA, column=col_idx, value=label)
         c.fill = fill("navy"); c.font = font(10, bold=True, color="white")
         c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
@@ -4201,8 +4267,9 @@ def build_rarm(ws):
         c.fill = fill("yellow_light"); c.font = font(10, bold=True)
         c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
 
-    ws.row_dimensions[3].height = 28
-    for col_idx in [COL_ID, COL_TITLE, COL_ASS, COL_KM]:
+    # ── Rij 3: kwetsbaarheden-rij ─────────────────────────────────────────────
+    ws.row_dimensions[ROW_VULN].height = 28
+    for col_idx in [COL_ID, COL_TITLE, COL_ASS, COL_KM, COL_COUNT]:
         c = ws.cell(row=ROW_VULN, column=col_idx)
         c.fill = fill("grey_light"); c.border = border_all("grey_border")
     for k in range(N_TEMPLATE):
@@ -4210,14 +4277,45 @@ def build_rarm(ws):
         c.fill = fill("blue_xlight"); c.font = font(9, italic=True, color="subtext")
         c.alignment = align("center", "center", wrap=True); c.border = border_all("navy")
 
+    # ── Rijen 4-7: CIA objectief + aangevinkt teller ──────────────────────────
+    cia_rows = [
+        (ROW_C_OBJ, "C Objectief", "blue_xlight"),
+        (ROW_I_OBJ, "I Objectief", "blue_xlight"),
+        (ROW_A_OBJ, "A Objectief", "blue_xlight"),
+        (ROW_COUNT, "Aangevinkt",  "green_light"),
+    ]
+    for row_idx, label, bg in cia_rows:
+        ws.row_dimensions[row_idx].height = 22
+        c = ws.cell(row=row_idx, column=COL_ID, value=label)
+        c.fill = fill(bg); c.font = font(9, bold=True)
+        c.alignment = align("left", "center", indent=1); c.border = border_all("grey_border")
+        for col_idx in [COL_TITLE, COL_ASS, COL_KM, COL_COUNT]:
+            c = ws.cell(row=row_idx, column=col_idx)
+            c.fill = fill(bg); c.border = border_all("grey_border")
+        for k in range(N_TEMPLATE):
+            col_da = COL_DA_START + k
+            c = ws.cell(row=row_idx, column=col_da)
+            c.fill = fill(bg); c.border = border_all("grey_border")
+            c.alignment = align("center", "center")
+            # Rij 7 (ROW_COUNT) krijgt een COUNTIF-formule per DA-kolom
+            if row_idx == ROW_COUNT:
+                col_letter = get_column_letter(col_da)
+                c.value = f'=COUNTA({col_letter}{ROW_DATA}:{col_letter}1048576)'
+                c.font = font(9, bold=True)
+
+    # ── Thick border: scheidt vaste meta-kolommen (A-D) van rest (E+) ─────────
     thick = Side(border_style="medium", color=C["navy"])
     for row_idx in range(1, ROW_DATA + len(controls) + 1):
-        cell = ws.cell(row=row_idx, column=COL_DA_START)
+        cell = ws.cell(row=row_idx, column=COL_COUNT)
         b = cell.border
         cell.border = Border(left=thick, right=b.right, top=b.top, bottom=b.bottom)
+        cell2 = ws.cell(row=row_idx, column=COL_DA_START)
+        b2 = cell2.border
+        cell2.border = Border(left=thick, right=b2.right, top=b2.top, bottom=b2.bottom)
 
-    ws.freeze_panes = "E4"
+    ws.freeze_panes = "G8"
 
+    # ── Rij 8+: controlrijen ─────────────────────────────────────────────────
     for i, (req_id, req_title, assurance, is_km) in enumerate(controls):
         row_idx = ROW_DATA + i
         bg_key, fg_key = ASS_STYLE.get(assurance, ("white", "text"))
@@ -4236,11 +4334,17 @@ def build_rarm(ws):
         c.fill = fill(bg_key); c.font = font(9, bold=True, color=fg_key)
         c.alignment = align("center", "center"); c.border = border_all("grey_border")
 
-        # Sleutelmaatregel — ✔ indien key measure in CyFun bron, anders leeg; togglebaar via dubbelklik
         c = ws.cell(row=row_idx, column=COL_KM)
         c.fill = fill(row_bg)
         c.value = "✔" if is_km else ""
         c.font = font(10, bold=True, color="green")
+        c.alignment = align("center", "center"); c.border = border_all("grey_border")
+
+        # # Aangevinkt: COUNTIF over alle DA-kolommen in deze rij
+        last_possible = get_column_letter(COL_DA_START + N_TEMPLATE + 90)
+        c = ws.cell(row=row_idx, column=COL_COUNT)
+        c.value = f'=COUNTA({get_column_letter(COL_DA_START)}{row_idx}:{last_possible}{row_idx})'
+        c.fill = fill(row_bg); c.font = font(9, bold=True)
         c.alignment = align("center", "center"); c.border = border_all("grey_border")
 
         for k in range(N_TEMPLATE):

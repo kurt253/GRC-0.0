@@ -220,16 +220,32 @@ def load_all(xlsm_path: str) -> dict:
     # ── RARM: controls + DA-kolommen ─────────────────────────────────────────
     ws = wb["RARM"]
     rarm_rows = list(ws.iter_rows(min_row=1, values_only=True))
-    RARM_COL_DA = 4  # kolom E = index 4 (0-based)
+    # Col E (idx 4) = # Aangevinkt; col F (idx 5) = first DA — VBA RARM_COL_DA=6 → Python idx 5
+    RARM_COL_COUNT = 4  # "# Aangevinkt" column (0-based)
+    RARM_COL_DA    = 5  # first DA column (0-based)
 
     da_header_row  = rarm_rows[1] if len(rarm_rows) > 1 else []
     da_names_rarm  = [str(v) for v in da_header_row[RARM_COL_DA:] if v]
     n_da = len(da_names_rarm)
 
-    # Controls (rij 4+): Control ID | Richtlijn | Assurance | Sleutelmaatregel | DA-checks
+    # CIA objectief rows (indices 3-5 = rows 4-6) and count row (index 6 = row 7)
+    cia_c_row = rarm_rows[3] if len(rarm_rows) > 3 else []
+    cia_i_row = rarm_rows[4] if len(rarm_rows) > 4 else []
+    cia_a_row = rarm_rows[5] if len(rarm_rows) > 5 else []
+    # Build per-DA CIA objectives dict: {da_name: {c, i, a}}
+    rarm_cia = {}
+    for j, da_name in enumerate(da_names_rarm):
+        col_idx = RARM_COL_DA + j
+        rarm_cia[da_name] = {
+            "c_obj": cia_c_row[col_idx] if col_idx < len(cia_c_row) else None,
+            "i_obj": cia_i_row[col_idx] if col_idx < len(cia_i_row) else None,
+            "a_obj": cia_a_row[col_idx] if col_idx < len(cia_a_row) else None,
+        }
+
+    # Controls (rij 8+ = index 7+): Control ID | Richtlijn | Assurance | Sleutelmaatregel | # Aangevinkt | DA-checks
     controls = []
     total_controls = 0
-    for row in rarm_rows[3:]:
+    for row in rarm_rows[7:]:
         if not row[0]:
             continue
         total_controls += 1
@@ -237,16 +253,19 @@ def load_all(xlsm_path: str) -> dict:
         for j, da_name in enumerate(da_names_rarm):
             col_idx = RARM_COL_DA + j
             da_checks[da_name] = (row[col_idx] == "✔") if col_idx < len(row) else False
+        count_val = sum(1 for v in da_checks.values() if v)
         controls.append({
-            "Control ID": row[0],
-            "Richtlijn":  row[1],
-            "Assurance":  row[2],
-            "Sleutel":    row[3] == "✔" if row[3] else False,
+            "Control ID":   row[0],
+            "Richtlijn":    row[1],
+            "Assurance":    row[2],
+            "Sleutel":      row[3] == "✔" if row[3] else False,
+            "# Aangevinkt": count_val,
             **{f"da_{da}": v for da, v in da_checks.items()},
         })
     result["df_rarm"]         = pd.DataFrame(controls)
     result["da_names"]        = da_names_rarm
     result["total_controls"]  = total_controls
+    result["rarm_cia"]        = rarm_cia
 
     # ── Kwetsbaarheden ────────────────────────────────────────────────────────
     ws = wb["Kwetsbaarheden"]
@@ -989,10 +1008,10 @@ elif pagina == "🎯 Maatregelen":
         ctrl_id  = ctrl["Control ID"]
         existing = risico_da.loc[ctrl_id] if ctrl_id in risico_da.index else None
         saved_opmerking = existing["Opmerkingen"] if existing is not None else ""
-        # Pre-fill commentaar met CIA-gat als het nog leeg is
         opmerking = saved_opmerking if (saved_opmerking and str(saved_opmerking).strip()) else auto_comment
         edit_data.append({
             "Control ID":        ctrl_id,
+            "# DA's":            int(ctrl.get("# Aangevinkt", 0) or 0),
             "Richtlijn":         ctrl.get("Richtlijn", ""),
             "Assurance":         ctrl.get("Assurance", ""),
             "Status":            existing["Status"] if existing is not None else "",
@@ -1015,6 +1034,8 @@ elif pagina == "🎯 Maatregelen":
         df_edit,
         column_config={
             "Control ID":  st.column_config.TextColumn("Control ID",  disabled=True, width="small"),
+            "# DA's":      st.column_config.NumberColumn("# DA's",    disabled=True, width="small",
+                               help="Aantal Dependent Assets dat deze maatregel heeft aangevinkt"),
             "Richtlijn":   st.column_config.TextColumn("Richtlijn",   disabled=True, width="large"),
             "Assurance":   st.column_config.TextColumn("Assurance",   disabled=True, width="small"),
             "Status": st.column_config.SelectboxColumn(
